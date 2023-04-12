@@ -5,6 +5,8 @@
 // http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to Creative
 // Commons, PO Box 1866, Mountain View, CA 94042, USA.
 
+use bytemuck::{Pod, Zeroable};
+
 pub type Color = u8;
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -14,17 +16,18 @@ pub struct Palette {
 
 const SPRITE_SIZE: u8 = 4;
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, Pod, Zeroable)]
+#[repr(C)]
 pub struct Sprite {
-    pub x: u8,
     pub y: u8,
     pub pattern_index: u8,
     pub attributes: u8,
+    pub x: u8,
 }
 
 #[derive(Debug)]
 pub struct Ppu {
-    pub oam: [u8; 256],
+    oam: [Sprite; 64],
     pub sprite_palettes: [Palette; 4],
     pub tile_palettes: [Palette; 4],
     pub background_color: Color,
@@ -37,7 +40,7 @@ pub struct Ppu {
     fine_x_scroll: u8, // 3 bits,
     w_latch: bool,
 
-    secondary_oam: [u8; 32],
+    secondary_oam: [Sprite; 8],
     sprite_render_states: [SpriteRenderState; 8],
     oam_evaluation_index: u8,
     secondary_oam_evaluation_index: u8,
@@ -143,7 +146,7 @@ pub enum BitPlane {
 impl Ppu {
     pub fn new() -> Self {
         Ppu {
-            oam: [0; 256],
+            oam: [Sprite::default(); 64],
             sprite_palettes: [Palette::default(); 4],
             tile_palettes: [Palette::default(); 4],
             background_color: 0,
@@ -153,7 +156,7 @@ impl Ppu {
             v_reg: 0,
             fine_x_scroll: 0,
             w_latch: false,
-            secondary_oam: [0; 32],
+            secondary_oam: [Sprite::default(); 8],
             sprite_render_states: [SpriteRenderState::default(); 8],
             oam_evaluation_index: 0,
             secondary_oam_evaluation_index: 0,
@@ -173,9 +176,21 @@ impl Ppu {
 
     pub fn oam_dma<M: Mapper>(&mut self, mapper: &mut M, page: u8) {
         let base_addr = u16::from(page) << 8;
-        for (dest, addr) in self.oam.iter_mut().zip(base_addr..=base_addr + 255) {
+        for (dest, addr) in self
+            .oam_bytes_mut()
+            .iter_mut()
+            .zip(base_addr..=base_addr + 255)
+        {
             *dest = mapper.read(addr);
         }
+    }
+
+    pub fn set_oam(&mut self, sprites: [Sprite; 64]) {
+        self.oam = sprites;
+    }
+
+    pub fn set_oam_bytes(&mut self, bytes: [u8; 256]) {
+        self.oam_bytes_mut().copy_from_slice(&bytes);
     }
 
     pub fn write_addr(&mut self, b: u8) {
@@ -239,6 +254,22 @@ impl Ppu {
         self.ctrl & PPUCTRL_NMI_ENABLE != 0
     }
 
+    fn oam_bytes(&self) -> &[u8; 256] {
+        <&[u8; 256]>::try_from(bytemuck::bytes_of(&self.oam)).unwrap()
+    }
+
+    fn oam_bytes_mut(&mut self) -> &mut [u8; 256] {
+        <&mut [u8; 256]>::try_from(bytemuck::bytes_of_mut(&mut self.oam)).unwrap()
+    }
+
+    fn secondary_oam_bytes(&self) -> &[u8; 32] {
+        <&[u8; 32]>::try_from(bytemuck::bytes_of(&self.secondary_oam)).unwrap()
+    }
+
+    fn secondary_oam_bytes_mut(&mut self) -> &mut [u8; 32] {
+        <&mut [u8; 32]>::try_from(bytemuck::bytes_of_mut(&mut self.secondary_oam)).unwrap()
+    }
+
     fn sprite_pattern_table_base(&self) -> u16 {
         pattern_table_base(self.ctrl & PPUCTRL_SPRITE_PATTERN_TABLE)
     }
@@ -295,29 +326,23 @@ impl Ppu {
         self.tile_pattern_table_base() + tile_offset + row_offset + plane as u16
     }
 
-    fn sprite_pattern_address(
-        &self,
-        index: u8,
-        sprite_y: u8,
-        sprite_attributes: u8,
-        plane: BitPlane,
-    ) -> u16 {
+    fn sprite_pattern_address(&self, sprite: Sprite, plane: BitPlane) -> u16 {
         // wrapping arithmetic so that empty Secondary OAM slots with unexpected Y values
         // don't trigger unexpected overflows.
-        let distance_from_sprite_top = if sprite_attributes & SPRITE_FLIP_Y == 0 {
-            self.cur_scanline.wrapping_sub(u16::from(sprite_y))
+        let distance_from_sprite_top = if sprite.attributes & SPRITE_FLIP_Y == 0 {
+            self.cur_scanline.wrapping_sub(u16::from(sprite.y))
         } else {
-            (u16::from(sprite_y) + u16::from(self.sprite_height() - 1))
+            (u16::from(sprite.y) + u16::from(self.sprite_height() - 1))
                 .wrapping_sub(self.cur_scanline)
         };
 
         if self.ctrl & PPUCTRL_SPRITE_SIZE == 0 {
-            let tile_offset = u16::from(index) * 16;
+            let tile_offset = u16::from(sprite.pattern_index) * 16;
             let row_offset = distance_from_sprite_top & 0b111;
             self.sprite_pattern_table_base() + tile_offset + row_offset + plane as u16
         } else {
-            let table_base = pattern_table_base(index & 1);
-            let tile_pair_offset = u16::from(index & 0b11111110) * 16;
+            let table_base = pattern_table_base(sprite.pattern_index & 1);
+            let tile_pair_offset = u16::from(sprite.pattern_index & 0b11111110) * 16;
             let tile_select = (distance_from_sprite_top & 0b1000) << 1;
             let row_offset = distance_from_sprite_top & 0b111;
             table_base + tile_pair_offset + tile_select + row_offset + plane as u16
@@ -397,15 +422,16 @@ impl Ppu {
     }
 
     fn cur_oam_byte(&self) -> u8 {
-        self.oam[self.oam_evaluation_index as usize]
+        self.oam_bytes()[self.oam_evaluation_index as usize]
     }
 
     fn cur_secondary_oam_byte_mut(&mut self) -> &mut u8 {
-        &mut self.secondary_oam[self.secondary_oam_evaluation_index as usize]
+        let i = self.secondary_oam_evaluation_index as usize;
+        &mut self.secondary_oam_bytes_mut()[i]
     }
 
     fn is_secondary_oam_full(&self) -> bool {
-        self.secondary_oam_evaluation_index as usize == self.secondary_oam.len()
+        self.secondary_oam_evaluation_index as usize == self.secondary_oam_bytes().len()
     }
 
     fn increment_oam_evaluation_index(&mut self, n: u8) {
@@ -442,7 +468,7 @@ impl Ppu {
                     self.increment_oam_evaluation_index(1);
                     self.secondary_oam_evaluation_index += 1;
                 } else {
-                    self.increment_oam_evaluation_index(4);
+                    self.increment_oam_evaluation_index(SPRITE_SIZE);
                 }
             }
             _ => {
@@ -456,17 +482,15 @@ impl Ppu {
     fn fetch_sprite_pattern<M: Mapper>(
         &self,
         mapper: &mut M,
-        index: u8,
-        y: u8,
-        attributes: u8,
+        sprite: Sprite,
         plane: BitPlane,
     ) -> u8 {
-        let addr = self.sprite_pattern_address(index, y, attributes, plane);
+        let addr = self.sprite_pattern_address(sprite, plane);
         let pattern = mapper.read(addr);
 
-        if !self.is_sprite_y_in_range(y) {
+        if !self.is_sprite_y_in_range(sprite.y) {
             0x00
-        } else if attributes & SPRITE_FLIP_X == 0 {
+        } else if sprite.attributes & SPRITE_FLIP_X == 0 {
             pattern.reverse_bits()
         } else {
             pattern
@@ -478,10 +502,7 @@ impl Ppu {
         // sprite fetches begin on cycle 257, so subtract 1 and shift down 3
         // to get index of current sprite.
         let sprite_index = (((self.cur_dot - 1) >> 3) & 0b111) as usize;
-
-        let sprite_y = self.secondary_oam[4 * sprite_index];
-        let sprite_pattern_index = self.secondary_oam[4 * sprite_index + 1];
-        let sprite_attributes = self.secondary_oam[4 * sprite_index + 2];
+        let sprite = self.secondary_oam[sprite_index];
 
         match (self.cur_dot - 1) & 0b110 {
             0b000 => {
@@ -491,31 +512,19 @@ impl Ppu {
                 // dummy nametable fetch 2
             }
             0b100 => {
-                self.temp_sprite_pattern_lo = self.fetch_sprite_pattern(
-                    mapper,
-                    sprite_pattern_index,
-                    sprite_y,
-                    sprite_attributes,
-                    BitPlane::Lo,
-                );
+                self.temp_sprite_pattern_lo =
+                    self.fetch_sprite_pattern(mapper, sprite, BitPlane::Lo);
 
                 let cur_render_state = &mut self.sprite_render_states[sprite_index];
-                cur_render_state.attributes = sprite_attributes;
+                cur_render_state.attributes = sprite.attributes;
             }
             0b110 => {
-                let pattern_hi = self.fetch_sprite_pattern(
-                    mapper,
-                    sprite_pattern_index,
-                    sprite_y,
-                    sprite_attributes,
-                    BitPlane::Hi,
-                );
-
+                let pattern_hi = self.fetch_sprite_pattern(mapper, sprite, BitPlane::Hi);
                 let pattern = morton_encode_16(self.temp_sprite_pattern_lo, pattern_hi);
 
                 let cur_render_state = &mut self.sprite_render_states[sprite_index];
                 cur_render_state.pattern_shift_reg = pattern;
-                cur_render_state.x_counter = self.secondary_oam[4 * sprite_index + 3];
+                cur_render_state.x_counter = sprite.x;
             }
             _ => {}
         }

@@ -17,10 +17,10 @@ pub struct Sprite {
 
 #[derive(Debug)]
 pub struct Ppu {
-    oam: [u8; 256],
-    sprite_palettes: [Palette; 4],
-    tile_palettes: [Palette; 4],
-    background_color: Color,
+    pub oam: [u8; 256],
+    pub sprite_palettes: [Palette; 4],
+    pub tile_palettes: [Palette; 4],
+    pub background_color: Color,
 
     ctrl: u8,
     mask: u8,
@@ -114,9 +114,15 @@ pub const COARSE_X_SCROLL_MASK: u16 = 0b000_00_00000_11111;
 pub const FINE_Y_SCROLL_MASK: u16 = 0b111_00_00000_00000;
 pub const COARSE_Y_SCROLL_MASK: u16 = 0b000_00_11111_00000;
 
+pub const COARSE_X_OFFSET: u16 = 0;
+pub const FINE_Y_OFFSET: u16 = 12;
+pub const COARSE_Y_OFFSET: u16 = 5;
+
 pub const NAMETABLE_SELECT_MASK: u16 = 0b000_11_00000_00000;
 pub const NAMETABLE_X_SELECT_MASK: u16 = 0b000_01_00000_00000;
 pub const NAMETABLE_Y_SELECT_MASK: u16 = 0b000_10_00000_00000;
+
+pub const NAMETABLE_SELECT_OFFSET: u16 = 10;
 
 pub const NAMETABLE_BASE_ADDRESS: u16 = 0b10_00_0000_000000;
 pub const ATTRIBUTE_TABLE_OFFSET: u16 = 0b00_00_1111_000000;
@@ -162,10 +168,10 @@ impl Ppu {
     pub fn write_addr(&mut self, b: u8) {
         let b = u16::from(b);
         if !self.w_latch {
-            self.t_reg &= 0b00000000_11111111;
+            self.t_reg &= 0x00FF;
             self.t_reg |= (b & 0x3F) << 8;
         } else {
-            self.t_reg &= 0b00111111_00000000;
+            self.t_reg &= 0xFF00;
             self.t_reg |= b;
             self.v_reg = self.t_reg;
         }
@@ -178,12 +184,12 @@ impl Ppu {
         let coarse = b >> 3;
         if !self.w_latch {
             self.fine_x_scroll = fine;
-            self.t_reg &= !COARSE_X_SCROLL_MASK;
-            self.t_reg |= u16::from(coarse);
+            self.t_reg &= !COARSE_X_SCROLL_MASK | NAMETABLE_SELECT_MASK;
+            self.t_reg |= u16::from(coarse) << COARSE_X_OFFSET;
         } else {
-            self.t_reg &= !Y_SCROLL_MASK;
-            self.t_reg |= u16::from(fine) << 12;
-            self.t_reg |= u16::from(coarse) << 5;
+            self.t_reg &= !Y_SCROLL_MASK | NAMETABLE_SELECT_MASK;
+            self.t_reg |= u16::from(fine) << FINE_Y_OFFSET;
+            self.t_reg |= u16::from(coarse) << COARSE_Y_OFFSET;
         }
 
         self.w_latch = !self.w_latch;
@@ -195,7 +201,7 @@ impl Ppu {
         self.ctrl = b;
         let nametable_bits = u16::from(b & 0b00000011);
         self.t_reg &= !NAMETABLE_SELECT_MASK;
-        self.t_reg |= nametable_bits << 10;
+        self.t_reg |= nametable_bits << NAMETABLE_SELECT_OFFSET;
     }
 
     pub fn set_mask(&mut self, b: u8) {
@@ -236,13 +242,17 @@ impl Ppu {
     }
 
     fn increment_y(&mut self) {
-        let y = (self.v_reg & Y_SCROLL_MASK)
-            .rotate_left(4)
-            .wrapping_add(!Y_SCROLL_MASK.rotate_left(4) + 1)
-            .rotate_right(4);
-        self.v_reg ^= y;
-        self.v_reg &= !Y_SCROLL_MASK;
-        self.v_reg ^= y;
+        if self.v_reg & FINE_Y_SCROLL_MASK != FINE_Y_SCROLL_MASK {
+            self.v_reg += 1 << FINE_Y_OFFSET;
+        } else {
+            self.v_reg &= !FINE_Y_SCROLL_MASK;
+            let coarse_y = (self.v_reg & COARSE_Y_SCROLL_MASK) >> COARSE_Y_OFFSET;
+            self.v_reg = match coarse_y {
+                29 => (self.v_reg & !COARSE_Y_SCROLL_MASK) ^ NAMETABLE_Y_SELECT_MASK,
+                31 => self.v_reg & !COARSE_Y_SCROLL_MASK,
+                _ => self.v_reg + (1 << COARSE_Y_OFFSET),
+            }
+        }
     }
 
     fn nametable_address(&self) -> u16 {
@@ -263,7 +273,7 @@ impl Ppu {
     }
 
     fn fine_y_scroll(&self) -> u8 {
-        (self.v_reg >> 12) as u8
+        (self.v_reg >> FINE_Y_OFFSET) as u8
     }
 
     fn tile_pattern_lo_address(&self, b: u8) -> u16 {

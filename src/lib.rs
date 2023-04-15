@@ -574,26 +574,17 @@ impl Ppu {
         buffer: &mut B,
         mode: RenderMode,
     ) {
+        if matches!(self.cur_dot, 1..=256 | 321..=336) {
+            self.update_tile_shift_regs();
+            self.tick_tile_pipeline(mapper);
+        }
+
         if mode == RenderMode::Normal {
             if self.cur_dot < 256 {
                 self.output_pixel(buffer);
                 self.update_sprite_counters_and_shift_regs();
             }
             self.tick_sprites(mapper);
-        }
-
-        match self.cur_dot {
-            0 => {
-                self.update_tile_shift_regs();
-            }
-            1..=256 | 321..=335 => {
-                self.tick_tile_pipeline(mapper);
-                self.update_tile_shift_regs();
-            }
-            336 => {
-                self.tick_tile_pipeline(mapper);
-            }
-            _ => {}
         }
 
         match self.cur_dot {

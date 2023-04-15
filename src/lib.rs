@@ -504,9 +504,11 @@ impl Ppu {
     }
 
     fn tick_clear_secondary_oam(&mut self) {
-        *self.cur_secondary_oam_byte_mut() = 0xFF;
-        self.secondary_oam_evaluation_index += 1;
-        self.secondary_oam_evaluation_index &= 0b00011111;
+        // writes only occur on even cycles, starting on cycle 1.
+        // Therefore, cycle 2 is the first cycle where a write occurs.
+        // So we can calculate the index by dividing cur_dot by 2 and subtracting 1.
+        let i = ((self.cur_dot - 1) >> 1) as usize;
+        self.secondary_oam_bytes_mut()[i] = 0xFF;
     }
 
     fn tick_sprite_evaluation(&mut self) {

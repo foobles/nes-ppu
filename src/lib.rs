@@ -393,6 +393,10 @@ impl Ppu {
             && !(in_column_0 && self.mask & PPUMASK_SHOW_COLUMN_0_TILES == 0)
     }
 
+    fn is_rendering_enabled(&self) -> bool {
+        self.mask & PPUMASK_SHOW_TILES != 0 || self.mask & PPUMASK_SHOW_SPRITES != 0
+    }
+
     fn greyscale_mask(&self) -> u8 {
         if self.mask & PPUMASK_GREYSCALE == 0 {
             0xFF
@@ -401,7 +405,7 @@ impl Ppu {
         }
     }
 
-    fn output_pixel<B: PpuPixelBuffer>(&self, buffer: &mut B) {
+    fn cur_pixel_color(&self) -> Color {
         let tile_attribute = (self.tile_attribute_shift_reg >> (2 * self.fine_x_scroll)) & 0b11;
         let tile_color_index = if self.are_tiles_visible() {
             (self.tile_pattern_shift_reg >> (2 * self.fine_x_scroll)) & 0b11
@@ -418,7 +422,7 @@ impl Ppu {
             .next()
             .filter(|_| self.are_sprites_visible());
 
-        let cur_pixel_color = match (visible_sprite, tile_color_index) {
+        match (visible_sprite, tile_color_index) {
             (Some(s), i) if i == 0 || s.attributes & SPRITE_PRIORITY == 0 => {
                 let sprite_palette_index = (s.attributes & SPRITE_PALETTE_MASK) as usize;
                 let sprite_color_index = (s.pattern_shift_reg & 0b11) as usize;
@@ -426,15 +430,18 @@ impl Ppu {
             }
             (_, 0) => self.background_color,
             (_, i) => self.tile_palettes[tile_attribute].colors[i - 1],
-        };
-        let cur_pixel_color = cur_pixel_color & self.greyscale_mask();
+        }
+    }
+
+    fn output_pixel<B: PpuPixelBuffer>(&self, buffer: &mut B, color: Color) {
+        let color = color & self.greyscale_mask();
         let emphasis = ColorEmphasis {
             bits: self.mask >> 5,
         };
         buffer.set_color(
             self.cur_dot as u8,
             self.cur_scanline as u8,
-            cur_pixel_color,
+            color,
             emphasis,
         );
     }
@@ -623,6 +630,13 @@ impl Ppu {
         buffer: &mut B,
         mode: RenderMode,
     ) {
+        if !self.is_rendering_enabled() {
+            if mode == RenderMode::Normal {
+                self.output_pixel(buffer, self.background_color);
+            }
+            return;
+        }
+
         if matches!(self.cur_dot, 1..=256 | 321..=336) {
             self.update_tile_shift_regs();
             self.tick_tile_pipeline(mapper);
@@ -630,7 +644,7 @@ impl Ppu {
 
         if mode == RenderMode::Normal {
             if self.cur_dot < 256 {
-                self.output_pixel(buffer);
+                self.output_pixel(buffer, self.cur_pixel_color());
                 self.update_sprite_counters_and_shift_regs();
             }
             self.tick_sprites(mapper);

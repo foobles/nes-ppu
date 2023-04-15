@@ -79,7 +79,7 @@ pub trait Mapper {
 }
 
 pub trait PpuPixelBuffer {
-    fn set_color(&mut self, x: u8, y: u8, c: u8);
+    fn set_color(&mut self, x: u8, y: u8, c: u8, emphasis: ColorEmphasis);
 }
 
 fn pattern_table_base(b: u8) -> u16 {
@@ -112,6 +112,15 @@ pub const PPUCTRL_SPRITE_SIZE: u8 = 1 << 5;
 pub const PPUCTRL_MSS: u8 = 1 << 6;
 pub const PPUCTRL_NMI_ENABLE: u8 = 1 << 7;
 
+pub const PPUMASK_GREYSCALE: u8 = 1 << 0;
+pub const PPUMASK_SHOW_COLUMN_0_TILES: u8 = 1 << 1;
+pub const PPUMASK_SHOW_COLUMN_0_SPRITES: u8 = 1 << 2;
+pub const PPUMASK_SHOW_TILES: u8 = 1 << 3;
+pub const PPUMASK_SHOW_SPRITES: u8 = 1 << 4;
+pub const PPUMASK_EMPH_RED: u8 = 1 << 5;
+pub const PPUMASK_EMPH_GREEN: u8 = 1 << 6;
+pub const PPUMASK_EMPH_BLUE: u8 = 1 << 7;
+
 pub const SPRITE_PALETTE_MASK: u8 = 0b00000011;
 pub const SPRITE_PRIORITY: u8 = 0b00100000;
 pub const SPRITE_FLIP_X: u8 = 0b01000000;
@@ -141,6 +150,11 @@ pub const ATTRIBUTE_TABLE_OFFSET: u16 = 0b00_00_1111_000000;
 pub enum BitPlane {
     Lo = 0,
     Hi = 8,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ColorEmphasis {
+    pub bits: u8,
 }
 
 impl Ppu {
@@ -367,27 +381,62 @@ impl Ppu {
         self.temp_tile_attribute >> (x_bit | y_bit) as u8
     }
 
-    pub fn output_pixel<B: PpuPixelBuffer>(&self, buffer: &mut B) {
+    fn are_sprites_visible(&self) -> bool {
+        let in_column_0 = self.cur_dot < 8;
+        (self.mask & PPUMASK_SHOW_SPRITES != 0)
+            && !(in_column_0 && self.mask & PPUMASK_SHOW_COLUMN_0_SPRITES == 0)
+    }
+
+    fn are_tiles_visible(&self) -> bool {
+        let in_column_0 = self.cur_dot < 8;
+        (self.mask & PPUMASK_SHOW_TILES != 0)
+            && !(in_column_0 && self.mask & PPUMASK_SHOW_COLUMN_0_TILES == 0)
+    }
+
+    fn greyscale_mask(&self) -> u8 {
+        if self.mask & PPUMASK_GREYSCALE == 0 {
+            0xFF
+        } else {
+            0x30
+        }
+    }
+
+    fn output_pixel<B: PpuPixelBuffer>(&self, buffer: &mut B) {
         let tile_attribute = (self.tile_attribute_shift_reg >> (2 * self.fine_x_scroll)) & 0b11;
-        let tile_color_index = (self.tile_pattern_shift_reg >> (2 * self.fine_x_scroll)) & 0b11;
+        let tile_color_index = if self.are_tiles_visible() {
+            (self.tile_pattern_shift_reg >> (2 * self.fine_x_scroll)) & 0b11
+        } else {
+            0
+        };
+        let tile_attribute = tile_attribute as usize;
+        let tile_color_index = tile_color_index as usize;
 
         let visible_sprite = self
             .sprite_render_states
             .iter()
             .filter(|&s| s.x_counter == 0 && s.pattern_shift_reg & 0b11 != 0)
-            .next();
+            .next()
+            .filter(|_| self.are_sprites_visible());
 
         let cur_pixel_color = match (visible_sprite, tile_color_index) {
             (Some(s), i) if i == 0 || s.attributes & SPRITE_PRIORITY == 0 => {
                 let sprite_palette_index = (s.attributes & SPRITE_PALETTE_MASK) as usize;
-                let sprite_color_index = ((s.pattern_shift_reg & 0b11) - 1) as usize;
-                self.sprite_palettes[sprite_palette_index].colors[sprite_color_index]
+                let sprite_color_index = (s.pattern_shift_reg & 0b11) as usize;
+                self.sprite_palettes[sprite_palette_index].colors[sprite_color_index - 1]
             }
             (_, 0) => self.background_color,
-            (_, i) => self.tile_palettes[tile_attribute as usize].colors[(i - 1) as usize],
+            (_, i) => self.tile_palettes[tile_attribute].colors[i - 1],
         };
-
-        buffer.set_color(self.cur_dot as u8, self.cur_scanline as u8, cur_pixel_color);
+        let cur_pixel_color = cur_pixel_color & self.greyscale_mask();
+        let emphasis = ColorEmphasis {
+            bits: self.mask >> 5,
+        };
+        buffer.set_color(
+            self.cur_dot as u8,
+            self.cur_scanline as u8,
+            cur_pixel_color,
+            emphasis,
+        );
     }
 
     fn tick_tile_pipeline<M: Mapper>(&mut self, mapper: &mut M) {

@@ -720,18 +720,15 @@ impl Ppu {
         }
 
         if mode == RenderMode::Normal {
+            self.tick_sprites(mapper);
             if self.cur_dot < 256 {
-                let PixelInfo {
-                    color,
-                    sprite_0_hit,
-                } = self.calculate_cur_pixel();
-                if sprite_0_hit {
+                let pixel_info = self.calculate_cur_pixel();
+                if pixel_info.sprite_0_hit {
                     self.status |= PPUSTATUS_SPRITE_0_HIT;
                 }
-                self.output_pixel(buffer, color);
+                self.output_pixel(buffer, pixel_info.color);
                 self.update_sprite_counters_and_shift_regs();
             }
-            self.tick_sprites(mapper);
         }
 
         match self.cur_dot {

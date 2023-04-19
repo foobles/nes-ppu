@@ -34,11 +34,15 @@ pub struct Ppu {
 
     ctrl: u8,
     mask: u8,
+    status: u8,
 
     t_reg: u16,
     v_reg: u16,
     fine_x_scroll: u8, // 3 bits,
     w_latch: bool,
+
+    sprite_0_cur_line: bool,
+    sprite_0_next_line: bool,
 
     secondary_oam: [Sprite; 8],
     sprite_render_states: [SpriteRenderState; 8],
@@ -121,6 +125,10 @@ pub const PPUMASK_EMPH_RED: u8 = 1 << 5;
 pub const PPUMASK_EMPH_GREEN: u8 = 1 << 6;
 pub const PPUMASK_EMPH_BLUE: u8 = 1 << 7;
 
+pub const PPUSTATUS_OVERFLOW: u8 = 1 << 5;
+pub const PPUSTATUS_SPRITE_0_HIT: u8 = 1 << 6;
+pub const PPUSTATUS_VBLANK: u8 = 1 << 7;
+
 pub const SPRITE_PALETTE_MASK: u8 = 0b00000011;
 pub const SPRITE_PRIORITY: u8 = 0b00100000;
 pub const SPRITE_FLIP_X: u8 = 0b01000000;
@@ -157,6 +165,12 @@ pub struct ColorEmphasis {
     pub bits: u8,
 }
 
+#[derive(Debug, Copy, Clone)]
+struct PixelInfo {
+    color: Color,
+    sprite_0_hit: bool,
+}
+
 impl Ppu {
     pub fn new() -> Self {
         Ppu {
@@ -166,10 +180,13 @@ impl Ppu {
             background_color: 0,
             ctrl: 0,
             mask: 0,
+            status: 0,
             t_reg: 0,
             v_reg: 0,
             fine_x_scroll: 0,
             w_latch: false,
+            sprite_0_cur_line: false,
+            sprite_0_next_line: false,
             secondary_oam: [Sprite::default(); 8],
             sprite_render_states: [SpriteRenderState::default(); 8],
             oam_evaluation_index: 0,
@@ -185,6 +202,48 @@ impl Ppu {
             temp_tile_pattern_hi: 0,
             cur_scanline: 0,
             cur_dot: 0,
+        }
+    }
+
+    pub fn tick<M: Mapper, B: PpuPixelBuffer>(&mut self, mapper: &mut M, buffer: &mut B) {
+        match self.cur_scanline {
+            0..=239 => self.tick_render(mapper, buffer, RenderMode::Normal), // render
+            240..=260 => self.tick_vblank(),                                 // vblank
+            261 => self.tick_render(mapper, buffer, RenderMode::PreRender),  // pre render line
+            _ => unreachable!(),
+        }
+
+        if self.cur_dot < 340 {
+            self.cur_dot += 1;
+        } else {
+            self.cur_dot = 0;
+            self.cur_scanline = (self.cur_scanline + 1) % 262;
+        }
+    }
+
+    pub fn tick_to_next_vblank<M: Mapper, B: PpuPixelBuffer>(
+        &mut self,
+        mapper: &mut M,
+        buffer: &mut B,
+    ) {
+        while self.status & PPUSTATUS_VBLANK != 0 {
+            self.tick(mapper, buffer);
+        }
+        while self.status & PPUSTATUS_VBLANK == 0 {
+            self.tick(mapper, buffer);
+        }
+    }
+
+    pub fn tick_to_next_sprite_0_hit<M: Mapper, B: PpuPixelBuffer>(
+        &mut self,
+        mapper: &mut M,
+        buffer: &mut B,
+    ) {
+        while self.status & PPUSTATUS_SPRITE_0_HIT != 0 {
+            self.tick(mapper, buffer);
+        }
+        while self.status & PPUSTATUS_SPRITE_0_HIT == 0 {
+            self.tick(mapper, buffer);
         }
     }
 
@@ -248,6 +307,12 @@ impl Ppu {
 
     pub fn set_mask(&mut self, b: u8) {
         self.mask = b;
+    }
+
+    pub fn read_status(&mut self) -> u8 {
+        let ret = self.status;
+        self.status &= !PPUSTATUS_VBLANK;
+        ret
     }
 
     fn address_increment(&self) -> u16 {
@@ -405,7 +470,7 @@ impl Ppu {
         }
     }
 
-    fn cur_pixel_color(&self) -> Color {
+    fn calculate_cur_pixel(&self) -> PixelInfo {
         let tile_attribute = (self.tile_attribute_shift_reg >> (2 * self.fine_x_scroll)) & 0b11;
         let tile_color_index = if self.are_tiles_visible() {
             (self.tile_pattern_shift_reg >> (2 * self.fine_x_scroll)) & 0b11
@@ -415,21 +480,33 @@ impl Ppu {
         let tile_attribute = tile_attribute as usize;
         let tile_color_index = tile_color_index as usize;
 
-        let visible_sprite = self
+        let (visible_sprite_index, visible_sprite) = self
             .sprite_render_states
             .iter()
-            .filter(|&s| s.x_counter == 0 && s.pattern_shift_reg & 0b11 != 0)
+            .enumerate()
+            .filter(|&(i, s)| {
+                self.are_sprites_visible() && s.x_counter == 0 && s.pattern_shift_reg & 0b11 != 0
+            })
             .next()
-            .filter(|_| self.are_sprites_visible());
+            .unzip();
 
-        match (visible_sprite, tile_color_index) {
-            (Some(s), i) if i == 0 || s.attributes & SPRITE_PRIORITY == 0 => {
+        let color = match (visible_sprite, tile_color_index) {
+            (Some(s), _) if tile_color_index == 0 || s.attributes & SPRITE_PRIORITY == 0 => {
                 let sprite_palette_index = (s.attributes & SPRITE_PALETTE_MASK) as usize;
                 let sprite_color_index = (s.pattern_shift_reg & 0b11) as usize;
                 self.sprite_palettes[sprite_palette_index].colors[sprite_color_index - 1]
             }
             (_, 0) => self.background_color,
-            (_, i) => self.tile_palettes[tile_attribute].colors[i - 1],
+            (_, _) => self.tile_palettes[tile_attribute].colors[tile_color_index - 1],
+        };
+        let sprite_0_hit = self.sprite_0_cur_line
+            && visible_sprite_index == Some(0)
+            && tile_color_index != 0
+            && self.cur_dot < 255;
+
+        PixelInfo {
+            color,
+            sprite_0_hit,
         }
     }
 
@@ -438,12 +515,7 @@ impl Ppu {
         let emphasis = ColorEmphasis {
             bits: self.mask >> 5,
         };
-        buffer.set_color(
-            self.cur_dot as u8,
-            self.cur_scanline as u8,
-            color,
-            emphasis,
-        );
+        buffer.set_color(self.cur_dot as u8, self.cur_scanline as u8, color, emphasis);
     }
 
     fn tick_tile_pipeline<M: Mapper>(&mut self, mapper: &mut M) {
@@ -523,6 +595,7 @@ impl Ppu {
                 *self.cur_secondary_oam_byte_mut() = sprite_y;
 
                 if self.is_sprite_y_in_range(sprite_y) {
+                    self.sprite_0_next_line |= self.oam_evaluation_index == 0;
                     self.increment_oam_evaluation_index(1);
                     self.secondary_oam_evaluation_index += 1;
                 } else {
@@ -596,6 +669,8 @@ impl Ppu {
                 self.oam_evaluation_index = 0;
                 self.secondary_oam_evaluation_index = 0;
                 self.is_sprite_evaluation_complete = false;
+                self.sprite_0_cur_line = self.sprite_0_next_line;
+                self.sprite_0_next_line = false;
             }
             1..=64 if even_cycle => {
                 self.tick_clear_secondary_oam();
@@ -646,13 +721,23 @@ impl Ppu {
 
         if mode == RenderMode::Normal {
             if self.cur_dot < 256 {
-                self.output_pixel(buffer, self.cur_pixel_color());
+                let PixelInfo {
+                    color,
+                    sprite_0_hit,
+                } = self.calculate_cur_pixel();
+                if sprite_0_hit {
+                    self.status |= PPUSTATUS_SPRITE_0_HIT;
+                }
+                self.output_pixel(buffer, color);
                 self.update_sprite_counters_and_shift_regs();
             }
             self.tick_sprites(mapper);
         }
 
         match self.cur_dot {
+            1 if mode == RenderMode::PreRender => {
+                self.status &= !(PPUSTATUS_SPRITE_0_HIT | PPUSTATUS_OVERFLOW | PPUSTATUS_VBLANK);
+            }
             256 => {
                 self.increment_y();
             }
@@ -666,21 +751,9 @@ impl Ppu {
         }
     }
 
-    fn tick_vblank(&mut self) {}
-
-    pub fn tick<M: Mapper, B: PpuPixelBuffer>(&mut self, mapper: &mut M, buffer: &mut B) {
-        match self.cur_scanline {
-            0..=239 => self.tick_render(mapper, buffer, RenderMode::Normal), // render
-            240..=260 => self.tick_vblank(),                                 // vblank
-            261 => self.tick_render(mapper, buffer, RenderMode::PreRender),  // pre render line
-            _ => unreachable!(),
-        }
-
-        if self.cur_dot < 340 {
-            self.cur_dot += 1;
-        } else {
-            self.cur_dot = 0;
-            self.cur_scanline = (self.cur_scanline + 1) % 262;
+    fn tick_vblank(&mut self) {
+        if self.cur_scanline == 241 && self.cur_dot == 1 {
+            self.status |= PPUSTATUS_VBLANK;
         }
     }
 }

@@ -1,9 +1,9 @@
 [package]
 name = "nes-ppu"
-version = "0.1.0"
+version = "0.1.1"
 description = "A NES graphics emulator with a generic pluggable interface."
 edition = "2021"
-license-file = "LICENSE"
+license = "CC-BY-NC-4.0"
 keywords = ["NES", "emulator", "graphics", "gamedev"]
 categories = ["emulators", "rendering"]
 repository = "https://github.com/foobles/nes-ppu"

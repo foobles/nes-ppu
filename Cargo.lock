@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ppu-emu"
+name = "nes-ppu"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

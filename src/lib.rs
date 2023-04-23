@@ -12,8 +12,8 @@
 //! present on the NES in order to make programming more ergonomic.
 //!
 //! ```no_run
-//! use ppu_emu::Ppu;
-//! # use ppu_emu::*;
+//! use nes_ppu::Ppu;
+//! # use nes_ppu::*;
 //! # struct NesMemoryMapper;
 //! # struct Buffer;
 //! # impl Mapper for NesMemoryMapper {
@@ -525,7 +525,7 @@ impl Ppu {
     /// new value of T afterwards. This means that the effective address that VRAM data accesses
     /// will use is only updated after setting the low bits.
     /// ```
-    /// # use ppu_emu::*;
+    /// # use nes_ppu::*;
     /// let mut ppu = Ppu::new();
     /// ppu.write_addr(0x20);       // sets the high 6 bits of the address
     /// ppu.write_addr(0x01);       // sets the low 8 bits of the address & updates effective address
@@ -536,7 +536,7 @@ impl Ppu {
     /// [`Ppu::read_status()`]. Here is an example of interfering with W in the middle of writing
     /// an address:
     /// ```
-    /// # use ppu_emu::*;
+    /// # use nes_ppu::*;
     /// let mut ppu = Ppu::new();   // W latch = 0
     /// ppu.write_addr(0x20);       // W = 0, so sets the high bits of the address (now W = 1)
     /// _ = ppu.read_status();      // clears W, now W = 0
@@ -567,7 +567,7 @@ impl Ppu {
     /// Calling `write_scroll()` the first time will set the x scroll, and calling it again
     /// will set the y scroll. Thus, `write_scroll()` is usually called twice in succession:
     /// ```
-    /// # use ppu_emu::*;
+    /// # use nes_ppu::*;
     /// let mut ppu = Ppu::new();
     /// ppu.write_scroll(100);      // sets the x scroll
     /// ppu.write_scroll(50);       // sets the y scroll
@@ -581,7 +581,7 @@ impl Ppu {
     ///
     /// Here is an example where W is interfered with between the two writes:
     /// ```
-    /// # use ppu_emu::*;
+    /// # use nes_ppu::*;
     /// let mut ppu = Ppu::new();   // W latch = 0
     /// ppu.write_scroll(100);      // because W = 0, sets the x scroll (now W = 1)
     /// _ = ppu.read_status();      // clears W, now W = 0

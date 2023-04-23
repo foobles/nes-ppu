@@ -335,7 +335,7 @@ const FINE_Y_OFFSET: u16 = 12;
 const COARSE_Y_OFFSET: u16 = 5;
 
 const NAMETABLE_SELECT_MASK: u16 = 0b000_11_00000_00000;
-const NAMETABLE_X_SELECT_MASK: u16 = 0b000_01_00000_00000;
+// const NAMETABLE_X_SELECT_MASK: u16 = 0b000_01_00000_00000;
 const NAMETABLE_Y_SELECT_MASK: u16 = 0b000_10_00000_00000;
 
 const NAMETABLE_SELECT_OFFSET: u16 = 10;
@@ -665,6 +665,8 @@ impl Ppu {
         ret
     }
 
+    // will be used later when implementing ppuaddr and ppudata
+    #[allow(unused)]
     fn address_increment(&self) -> u16 {
         match self.ctrl & PPUCTRL_ADDR_INC {
             0 => 1,
@@ -677,10 +679,6 @@ impl Ppu {
             0 => 8,
             _ => 16,
         }
-    }
-
-    fn is_nmi_enabled(&self) -> bool {
-        self.ctrl & PPUCTRL_NMI_ENABLE != 0
     }
 
     fn oam_bytes(&self) -> &[u8; 256] {
@@ -834,7 +832,7 @@ impl Ppu {
             .sprite_render_states
             .iter()
             .enumerate()
-            .filter(|&(i, s)| {
+            .filter(|&(_, s)| {
                 self.are_sprites_visible() && s.x_counter == 0 && s.pattern_shift_reg & 0b11 != 0
             })
             .next()

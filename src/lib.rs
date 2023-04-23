@@ -5,32 +5,165 @@
 // http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to Creative
 // Commons, PO Box 1866, Mountain View, CA 94042, USA.
 
+//! A NES graphics emulator with a Rust interface.
+//!
+//! This library provides a generic interface for a NES graphics emulator that mimics the interface
+//! provided on the actual system. In addition, this library also provides some conveniences not
+//! present on the NES in order to make programming more ergonomic.
+//!
+//! ```no_run
+//! use ppu_emu::Ppu;
+//! # use ppu_emu::*;
+//! # struct NesMemoryMapper;
+//! # struct Buffer;
+//! # impl Mapper for NesMemoryMapper {
+//! #     fn read(&mut self, addr: u16) -> u8 { todo!() }
+//! #     fn write(&mut self, addr: u16, value: u8) {}
+//! # }
+//! #
+//! # impl PixelBuffer for Buffer {
+//! #     fn set_color(&mut self, x: u8, y: u8, c: u8, emphasis: ColorEmphasis) {}
+//! # }
+//! #
+//! # impl NesMemoryMapper {
+//! #     fn new() -> Self { NesMemoryMapper }
+//! # }
+//! # impl Buffer {
+//! #     fn new() -> Self { Buffer }
+//! # }
+//!
+//! fn main_loop() {
+//!     let mut ppu = Ppu::new();
+//!
+//!     // example types not provided by this library
+//!     let mut mapper = NesMemoryMapper::new();
+//!     let mut pixel_buf = Buffer::new();
+//!
+//!     loop {
+//!         // run main game logic here
+//!
+//!         ppu.tick_to_next_sprite_0_hit(&mut mapper, &mut pixel_buf);
+//!         // add sprite 0 hit raster effect here
+//!
+//!         ppu.tick_to_next_vblank(&mut mapper, &mut pixel_buf);
+//!         // render pixel buffer to screen here
+//!     }
+//! }
+
 use bytemuck::{Pod, Zeroable};
 
+/// A number corresponding to a color.
+///
+/// Each color the [`Ppu`] can output corresponds to a 6-bit `Color` value.
+/// The low 4 bits specify the hue, and the high 2 bits specify the brightness.
+///
+/// Color values are only valid in the range `0x00-0x3F`. Any value outside that range will
+/// be truncated to fit when writing to [`Ppu`] color palette memory.
+///
+/// Warning: using color value `13`/`0x0d` on actual Nintendo hardware generates
+/// invalid NTSC signals that can cause televisions to display the frame incorrectly.
+/// Avoid using color value `13`, though it is still allowed for authenticity.
+///
+/// Here is an example palette demonstrating what color each number should correspond to
+/// (numbers given in hex):
+/// ![Table showing 64 colored squares with overlayed hex values](https://i.imgur.com/4JRZBye.png)
+///
+/// Note that different TVs display NES output differently, so this palette is not exact. This
+/// image is just a rough example.
 pub type Color = u8;
 
+/// A set of colors usable by tiles and sprites.
+///
+/// Tiles and sprites each have a bit depth of 2 bits per pixel, meaning that any given
+/// tile or sprite can only use 4 total colors. For both tiles and sprites, the color index 0
+/// always corresponds to transparency. The remaining indicies (1, 2, and 3) correspond to
+/// the colors in a `Palette`.
+///
+/// The [`Ppu`] supports 4 different palettes for tiles, and a separate 4 palettes for sprites.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct Palette {
+    /// The array of 3 colors in the palette.
     pub colors: [Color; 3],
 }
 
 const SPRITE_SIZE: u8 = 4;
 
+/// A floating graphic is rendered separately from tiles.
+///
+/// A sprite can be drawn to any position on the screen, and is either 8x8px or 8x16px in size.
+/// Each sprite uses one of 4 sprite palettes for color, which are separate from the 4 tile
+/// palettes.
+///
+/// [Read more about sprites on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_OAM)
 #[derive(Debug, Copy, Clone, Default, Pod, Zeroable)]
 #[repr(C)]
 pub struct Sprite {
+    /// Y coordinate of the sprite's top-left corner.
     pub y: u8,
+    /// The index for the sprite's graphics. In 8x8px mode, this is relative to the
+    /// sprite pattern table selected in the PPU [ctrl](Ppu::write_ctrl) register. In 8x16px mode,
+    /// The least significant bit sets the bank, and the most significant 7 bits index into pairs
+    /// of graphics within that bank.
     pub pattern_index: u8,
+    /// A bit field configuring whether the sprite is flipped along the x or y axes,
+    /// whether it is rendered in front of or behind tiles, and the sprite's palette index.
     pub attributes: u8,
+    /// X coordinate of the sprite's top-left corner.
     pub x: u8,
 }
 
+/// The NES Picture Processing Unit.
+///
+/// The Picture Processing Unit, or PPU, renders each frame of video line-by-line,
+/// pixel-by-pixel. It starts in the top left corner of the screen, moves to the right, and then
+/// continues from the leftmost pixel of the next row underneath the previous.
+///
+/// ## Scanlines
+/// Each row of pixels is referred to as a scanline. After a full row of 256 pixels is rendered,
+/// the PPU has to wait a short amount of time (85 ticks) before it can begin outputting pixels for
+/// the next scanline. During this waiting period, the PPU fetches graphics data from memory
+/// that it will need for the next scanline. This waiting period at the end of each scanline is
+/// referred to as **horizontal blanking** or **hblank**.
+///
+/// Because the PPU is not rendering during hblank, and thus some parts of its operation are idle,
+/// hblank provides a short window for programs to interfere with the state of rendering in the
+/// middle of a frame, albeit in a limited capacity.
+///
+/// ## Frames
+/// Each frame of video the NES outputs is 256x240 pixels. After the 240th scanline is complete,
+/// the PPU enters a new blanking period called **vertical blanking** or **vblank**, which lasts
+/// for about 20 scanlines' worth of time (depending on how you count). During this period, the
+/// PPU is completely idle, meaning this is the span of time where programs should write data
+/// into VRAM, copy new sprite information into OAM, etc.
+///
+/// ## OAM
+/// Object Attribute Memory, or OAM, is a 256 byte array stored internally within the PPU
+/// containing information about all the sprites currently on screen. Each sprite takes up 4 bytes,
+/// so OAM can alternately be thought of as an array of 64 sprites.
+///
+/// Each scanline, the PPU reads through OAM to see which sprites should be rendered on that line,
+/// which it determines by comparing their y-coordinates, the sprite size configured in the
+/// [ctrl](Ppu::write_ctrl) register, and the current scanline number. It picks the first 8
+/// candidates it finds, and renders them on the next scanline.
+///
+/// This means that there are two important things to consider when placing sprite data into OAM:
+/// * Sprites are rendered one pixel lower than their specified y-coordinate.
+/// * Only 8 sprites are rendered per scanline, with ones coming later in OAM being ignored.
+///
+/// A common strategy on the NES to prevent sprites from "disappearing" when too many appear
+/// on a single row of pixels is to shuffle the order that sprites appear in OAM every frame.
+/// This way, instead of some sprites disappearing, all the sprites on that row "flicker," because
+/// the sprites that get ignored are different every frame.
+///
+/// There is no way to disable a sprite; all 64 sprites are always active at once.
+/// However, you can hide a sprite by setting its y-coordinate below the visible area of the
+/// screen, i.e., to any value ≥ 240, most commonly 0xFF.
 #[derive(Debug)]
 pub struct Ppu {
     oam: [Sprite; 64],
-    pub sprite_palettes: [Palette; 4],
-    pub tile_palettes: [Palette; 4],
-    pub background_color: Color,
+    sprite_palettes: [Palette; 4],
+    tile_palettes: [Palette; 4],
+    background_color: Color,
 
     ctrl: u8,
     mask: u8,
@@ -77,13 +210,168 @@ enum RenderMode {
     PreRender,
 }
 
+/// Memory map used by the PPU to access video memory.
+///
+/// This trait enables the [`Ppu`] to read from video memory while rendering, in order to fetch
+/// tile and pattern data. In addition, internal palette data is accessible to the user by
+/// using certain address ranges.
+///
+/// The PPU uses the following address ranges to look up the corresponding data:
+/// * `0x0000..=0x0FFF`: Pattern table 1
+/// * `0x1000..=0x1FFF`: Pattern table 2
+/// * `0x2000..=0x23FF`: Nametable 1
+/// * `0x2400..=0x27FF`: Nametable 2
+/// * `0x2800..=0x2BFF`: Nametable 3
+/// * `0x2C00..=0x2FFF`: Nametable 4
+///
+/// Addresses outside of these ranges can be mapped to anything. Furthermore, you may
+/// map addresses to overlapping regions of memory. For example, it is common to map the
+/// addresses for nametables 1 and 2 to the same memory that the addresses for nametables 3 and 4
+/// are mapped to.
+///
+/// The address range `0x3F00..=0x3F1F` and all subsequent addresses up to `0x3FFF` always
+/// map to internal palette memory, although the PPU does not access these addresses through
+/// the mapper when rendering.
+/// If you map these addresses in an implementation of `Mapper`, they will always be
+/// ignored, since them mapping to palette memory is done within the PPU itself.
+///
+/// Read more on the NESdev Wiki:
+/// * [PPU memory map](https://www.nesdev.org/wiki/PPU_memory_map)
+/// * [Pattern tables](https://www.nesdev.org/wiki/PPU_pattern_tables)
+/// * [Nametables](https://www.nesdev.org/wiki/PPU_nametables)
+/// * [Palette memory](https://www.nesdev.org/wiki/PPU_palettes#Memory_Map)
 pub trait Mapper {
-    fn read(&mut self, addr: u16) -> u8; // yes this needs to be mut
+    /// Returns the value mapped to the provided 14-bit address.
+    ///
+    /// This function is allowed to have side effects and consecutive reads of the same
+    /// address do not need to return the same value.
+    ///
+    /// A memory read does not actually need to occur.
+    fn read(&mut self, addr: u16) -> u8;
+
+    /// Writes to the value mapped to the provided 14-bit address.
+    ///
+    /// This function is allowed to have side effects beyond the expressed memory write,
+    /// and subsequent reads from the same address do not need to return `value`.
+    ///
+    /// A memory write does not actually need to occur.
     fn write(&mut self, addr: u16, value: u8);
 }
 
-pub trait PpuPixelBuffer {
-    fn set_color(&mut self, x: u8, y: u8, c: u8, emphasis: ColorEmphasis);
+/// Receives pixel information from the PPU as it draws.
+///
+/// This trait allows for the [`Ppu`] to be used with any graphical (or otherwise) frontend.
+pub trait PixelBuffer {
+    /// Sets the color of the pixel at the given x/y coordinate to that specified by `color`,
+    /// and modulated by `emphasis`.
+    ///
+    /// `x` is always in the range `0..=255` and specifies distance from the left side of the screen.
+    /// `y` is always in the range `0..=239` and specifies distance from the top of the screen.
+    fn set_color(&mut self, x: u8, y: u8, color: Color, emphasis: ColorEmphasis);
+}
+
+/// Automatic increment of VRAM addr (0: 1; 1: 32).
+pub const PPUCTRL_ADDR_INC: u8 = 1 << 2;
+/// Sprite pattern table (0: 0x0000; 1: 0x1000). Ignored if sprite size is 8x16px.
+pub const PPUCTRL_SPRITE_PATTERN_TABLE: u8 = 1 << 3;
+/// Tile pattern table (0: 0x0000; 1: 0x1000).
+pub const PPUCTRL_TILE_PATTERN_TABLE: u8 = 1 << 4;
+/// Sprite size (0: 8x8px; 1: 8x16px).
+pub const PPUCTRL_SPRITE_SIZE: u8 = 1 << 5;
+/// EXT pin behavior (0: background read from EXT; 1: color output on EXT) - DO NOT USE.
+///
+/// Note that setting this bit in the [ctrl] register causes a short circuit on NES hardware,
+/// which this library emulates via panicking.
+///
+/// [ctrl]: Ppu::write_ctrl
+pub const PPUCTRL_MSS: u8 = 1 << 6;
+/// Interrupt when PPU enters vblank (0: off; 1: on).
+///
+/// This emulator does not emulate interrupts, so this is ignored.
+pub const PPUCTRL_NMI_ENABLE: u8 = 1 << 7;
+
+/// Greyscale color.
+pub const PPUMASK_GREYSCALE: u8 = 1 << 0;
+/// Show tiles in the leftmost 8 pixels of the screen.
+pub const PPUMASK_SHOW_COLUMN_0_TILES: u8 = 1 << 1;
+/// Show sprites in the leftmost 8 pixels of the screen.
+pub const PPUMASK_SHOW_COLUMN_0_SPRITES: u8 = 1 << 2;
+/// Show tiles.
+pub const PPUMASK_SHOW_TILES: u8 = 1 << 3;
+/// Show sprites.
+pub const PPUMASK_SHOW_SPRITES: u8 = 1 << 4;
+/// Emphasize red color output.
+pub const PPUMASK_EMPH_RED: u8 = 1 << 5;
+/// Emphasize green color output.
+pub const PPUMASK_EMPH_GREEN: u8 = 1 << 6;
+/// Emphasize blue color output.
+pub const PPUMASK_EMPH_BLUE: u8 = 1 << 7;
+
+/// Sprite dropout has occurred this frame (unimplemented).
+pub const PPUSTATUS_OVERFLOW: u8 = 1 << 5;
+/// A non-transparent pixel of sprite 0 has overlapped a non-transparent pixel of a tile this frame.
+pub const PPUSTATUS_SPRITE_0_HIT: u8 = 1 << 6;
+/// The PPU is in vblank.
+pub const PPUSTATUS_VBLANK: u8 = 1 << 7;
+
+/// Mask for sprite palette index bits.
+pub const SPRITE_PALETTE_MASK: u8 = 0b00000011;
+/// Render sprite in front or behind tiles (0: in front; 1: behind).
+pub const SPRITE_PRIORITY: u8 = 0b00100000;
+/// Flip sprite along the x axis.
+pub const SPRITE_FLIP_X: u8 = 0b01000000;
+/// Flip sprite along the y axis.
+pub const SPRITE_FLIP_Y: u8 = 0b10000000;
+
+const X_SCROLL_MASK: u16 = 0b000_01_00000_11111;
+const Y_SCROLL_MASK: u16 = 0b111_10_11111_00000;
+
+const COARSE_X_SCROLL_MASK: u16 = 0b000_00_00000_11111;
+const FINE_Y_SCROLL_MASK: u16 = 0b111_00_00000_00000;
+const COARSE_Y_SCROLL_MASK: u16 = 0b000_00_11111_00000;
+
+const COARSE_X_OFFSET: u16 = 0;
+const FINE_Y_OFFSET: u16 = 12;
+const COARSE_Y_OFFSET: u16 = 5;
+
+const NAMETABLE_SELECT_MASK: u16 = 0b000_11_00000_00000;
+const NAMETABLE_X_SELECT_MASK: u16 = 0b000_01_00000_00000;
+const NAMETABLE_Y_SELECT_MASK: u16 = 0b000_10_00000_00000;
+
+const NAMETABLE_SELECT_OFFSET: u16 = 10;
+
+const NAMETABLE_BASE_ADDRESS: u16 = 0b10_00_0000_000000;
+const ATTRIBUTE_TABLE_OFFSET: u16 = 0b00_00_1111_000000;
+
+/// Red, green, and/or blue color emphasis information.
+///
+/// This type is only used to communicate how a [`PixelBuffer`] should modulate
+/// its color output when it receives pixel information.
+///
+/// The the `bits` field is a bitset with 3 fields in its least significant bits:
+/// ```text
+/// 7 6 5 4 3 2 1 0
+/// x x x x x B G R
+///           | | |
+///           | | +- Red color emphasis.
+///           | +--- Blue color emphasis.
+///           +----- Green color emphasis.
+/// ```
+/// The high 5 bits will never be set.
+#[derive(Debug, Copy, Clone)]
+pub struct ColorEmphasis {
+    pub bits: u8,
+}
+#[repr(u16)]
+enum BitPlane {
+    Lo = 0,
+    Hi = 8,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct PixelInfo {
+    color: Color,
+    sprite_0_hit: bool,
 }
 
 fn pattern_table_base(b: u8) -> u16 {
@@ -109,69 +397,8 @@ fn morton_encode_16(lo: u8, hi: u8) -> u16 {
     x | (y << 1)
 }
 
-pub const PPUCTRL_ADDR_INC: u8 = 1 << 2;
-pub const PPUCTRL_SPRITE_PATTERN_TABLE: u8 = 1 << 3;
-pub const PPUCTRL_TILE_PATTERN_TABLE: u8 = 1 << 4;
-pub const PPUCTRL_SPRITE_SIZE: u8 = 1 << 5;
-pub const PPUCTRL_MSS: u8 = 1 << 6;
-pub const PPUCTRL_NMI_ENABLE: u8 = 1 << 7;
-
-pub const PPUMASK_GREYSCALE: u8 = 1 << 0;
-pub const PPUMASK_SHOW_COLUMN_0_TILES: u8 = 1 << 1;
-pub const PPUMASK_SHOW_COLUMN_0_SPRITES: u8 = 1 << 2;
-pub const PPUMASK_SHOW_TILES: u8 = 1 << 3;
-pub const PPUMASK_SHOW_SPRITES: u8 = 1 << 4;
-pub const PPUMASK_EMPH_RED: u8 = 1 << 5;
-pub const PPUMASK_EMPH_GREEN: u8 = 1 << 6;
-pub const PPUMASK_EMPH_BLUE: u8 = 1 << 7;
-
-pub const PPUSTATUS_OVERFLOW: u8 = 1 << 5;
-pub const PPUSTATUS_SPRITE_0_HIT: u8 = 1 << 6;
-pub const PPUSTATUS_VBLANK: u8 = 1 << 7;
-
-pub const SPRITE_PALETTE_MASK: u8 = 0b00000011;
-pub const SPRITE_PRIORITY: u8 = 0b00100000;
-pub const SPRITE_FLIP_X: u8 = 0b01000000;
-pub const SPRITE_FLIP_Y: u8 = 0b10000000;
-
-pub const X_SCROLL_MASK: u16 = 0b000_01_00000_11111;
-pub const Y_SCROLL_MASK: u16 = 0b111_10_11111_00000;
-
-pub const COARSE_X_SCROLL_MASK: u16 = 0b000_00_00000_11111;
-pub const FINE_Y_SCROLL_MASK: u16 = 0b111_00_00000_00000;
-pub const COARSE_Y_SCROLL_MASK: u16 = 0b000_00_11111_00000;
-
-pub const COARSE_X_OFFSET: u16 = 0;
-pub const FINE_Y_OFFSET: u16 = 12;
-pub const COARSE_Y_OFFSET: u16 = 5;
-
-pub const NAMETABLE_SELECT_MASK: u16 = 0b000_11_00000_00000;
-pub const NAMETABLE_X_SELECT_MASK: u16 = 0b000_01_00000_00000;
-pub const NAMETABLE_Y_SELECT_MASK: u16 = 0b000_10_00000_00000;
-
-pub const NAMETABLE_SELECT_OFFSET: u16 = 10;
-
-pub const NAMETABLE_BASE_ADDRESS: u16 = 0b10_00_0000_000000;
-pub const ATTRIBUTE_TABLE_OFFSET: u16 = 0b00_00_1111_000000;
-
-#[repr(u16)]
-pub enum BitPlane {
-    Lo = 0,
-    Hi = 8,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct ColorEmphasis {
-    pub bits: u8,
-}
-
-#[derive(Debug, Copy, Clone)]
-struct PixelInfo {
-    color: Color,
-    sprite_0_hit: bool,
-}
-
 impl Ppu {
+    /// Creates a new PPU instance in an unspecified state.
     pub fn new() -> Self {
         Ppu {
             oam: [Sprite::default(); 64],
@@ -205,7 +432,9 @@ impl Ppu {
         }
     }
 
-    pub fn tick<M: Mapper, B: PpuPixelBuffer>(&mut self, mapper: &mut M, buffer: &mut B) {
+    /// Run the PPU for 1 cycle. This may induce memory accesses through the `mapper`, as well as
+    /// outputting pixel information to the `buffer`.
+    pub fn tick<M: Mapper, B: PixelBuffer>(&mut self, mapper: &mut M, buffer: &mut B) {
         match self.cur_scanline {
             0..=239 => self.tick_render(mapper, buffer, RenderMode::Normal), // render
             240..=260 => self.tick_vblank(),                                 // vblank
@@ -221,7 +450,16 @@ impl Ppu {
         }
     }
 
-    pub fn tick_to_next_vblank<M: Mapper, B: PpuPixelBuffer>(
+    /// Run the PPU until it would emit an interrupt signalling that it has entered the vertical
+    /// blanking period. If the PPU is already in vblank, this will tick until the
+    /// vertical blank of the next frame.
+    ///
+    /// Just like [`Ppu::tick()`], this function may induce memory accesses through `mapper` and
+    /// output pixel information to `buffer`.
+    ///
+    /// Once this function returns, a full frame will have been rendered to `buffer`, which is a
+    /// good time to output its contents to the screen.
+    pub fn tick_to_next_vblank<M: Mapper, B: PixelBuffer>(
         &mut self,
         mapper: &mut M,
         buffer: &mut B,
@@ -234,7 +472,17 @@ impl Ppu {
         }
     }
 
-    pub fn tick_to_next_sprite_0_hit<M: Mapper, B: PpuPixelBuffer>(
+    /// Run the PPU until the sprite-0-hit flag is set in the status register. If the flag is
+    /// already set, this will run until it is cleared and then set again.
+    ///
+    /// Just like [`Ppu::tick()`], this function may induce memory accesses through `mapper` and
+    /// output pixel information to `buffer`.
+    ///
+    /// Once this function returns, the PPU will have just output the first pixel where a
+    /// non-transparent pixel of the sprite in slot 0 overlaps a non-transparent pixel of a
+    /// tile. This is a good way to time mid-frame raster effects like split scrolling.
+    ///
+    pub fn tick_to_next_sprite_0_hit<M: Mapper, B: PixelBuffer>(
         &mut self,
         mapper: &mut M,
         buffer: &mut B,
@@ -247,25 +495,58 @@ impl Ppu {
         }
     }
 
-    pub fn oam_dma<M: Mapper>(&mut self, mapper: &mut M, page: u8) {
-        let base_addr = u16::from(page) << 8;
-        for (dest, addr) in self
-            .oam_bytes_mut()
-            .iter_mut()
-            .zip(base_addr..=base_addr + 255)
-        {
-            *dest = mapper.read(addr);
-        }
-    }
-
+    /// Overwrites the contents of [OAM] with the given sprite array.
+    ///
+    /// This is a convenience utility not actually provided when programming for the NES.
+    ///
+    /// [OAM]: Ppu#oam
     pub fn set_oam(&mut self, sprites: [Sprite; 64]) {
         self.oam = sprites;
     }
 
+    /// Overwrites the contents of [OAM] with the given byte array.
+    ///
+    /// This is a convenience utility not actually provided when programming for the NES.
+    ///
+    /// [OAM]: Ppu#oam
     pub fn set_oam_bytes(&mut self, bytes: [u8; 256]) {
         self.oam_bytes_mut().copy_from_slice(&bytes);
     }
 
+    /// Sets the high or low byte of the address for VRAM data accesses.
+    ///
+    /// Calling `write_addr()` the first time will set the high 6 bits of the VRAM address (the
+    /// high 2 bits of the input are ignored),
+    /// and calling it again will set the low 8 bits. Thus, `write_addr()` is usually called
+    /// twice in succession.
+    ///
+    /// Writing to either half of the address writes to the internal T register.
+    /// When writing to the low 8 bits, the internal V register is set to the
+    /// new value of T afterwards. This means that the effective address that VRAM data accesses
+    /// will use is only updated after setting the low bits.
+    /// ```
+    /// # use ppu_emu::*;
+    /// let mut ppu = Ppu::new();
+    /// ppu.write_addr(0x20);       // sets the high 6 bits of the address
+    /// ppu.write_addr(0x01);       // sets the low 8 bits of the address & updates effective address
+    /// // the address now contained in T and V is 0x2001.
+    /// ```
+    /// Whether or not `write_addr()` updates the high or low bits of the address is dependent
+    /// on the internal W latch, which is also modified by [`Ppu::write_scroll()`] and
+    /// [`Ppu::read_status()`]. Here is an example of interfering with W in the middle of writing
+    /// an address:
+    /// ```
+    /// # use ppu_emu::*;
+    /// let mut ppu = Ppu::new();   // W latch = 0
+    /// ppu.write_addr(0x20);       // W = 0, so sets the high bits of the address (now W = 1)
+    /// _ = ppu.read_status();      // clears W, now W = 0
+    /// ppu.write_addr(0x24);       // W = 0, so sets the high bits again (now W = 1)
+    /// ppu.write_addr(0x00);       // W = 1, so sets the low bits and sets V to T (now W = 0)
+    /// ```
+    ///
+    /// [Read more about the addr register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#PPUADDR)
+    ///
+    /// [Read more about how setting the address interacts with W, T, and V on the NESdev wiki.](https://www.nesdev.org/wiki/PPU_scrolling#PPU_internal_registers)
     pub fn write_addr(&mut self, b: u8) {
         let b = u16::from(b);
         if !self.w_latch {
@@ -280,6 +561,37 @@ impl Ppu {
         self.w_latch = !self.w_latch;
     }
 
+    /// Sets the value of x or y scrolling relative to the current nametable selected in the
+    /// [ctrl](Ppu::write_ctrl) register.
+    ///
+    /// Calling `write_scroll()` the first time will set the x scroll, and calling it again
+    /// will set the y scroll. Thus, `write_scroll()` is usually called twice in succession:
+    /// ```
+    /// # use ppu_emu::*;
+    /// let mut ppu = Ppu::new();
+    /// ppu.write_scroll(100);      // sets the x scroll
+    /// ppu.write_scroll(50);       // sets the y scroll
+    /// ```
+    /// Note that x and y scroll values modify the value of the internal T register. Also,
+    /// nametables are only 240 pixels tall, so setting the y scroll to a number ≥240 will cause
+    /// garbage tiles to be displayed.
+    ///
+    /// Whether or not this function updates the x or y scroll is dependent on the internal W latch.
+    /// Both [`Ppu::write_addr()`] and [`Ppu::read_status()`] also affect this latch.
+    ///
+    /// Here is an example where W is interfered with between the two writes:
+    /// ```
+    /// # use ppu_emu::*;
+    /// let mut ppu = Ppu::new();   // W latch = 0
+    /// ppu.write_scroll(100);      // because W = 0, sets the x scroll (now W = 1)
+    /// _ = ppu.read_status();      // clears W, now W = 0
+    /// ppu.write_scroll(100);      // because W = 0, sets the x scroll again (now W = 1)
+    /// ppu.write_scroll(50);       // because W = 1, sets the y scroll (now W = 0 again)
+    ///```
+    ///
+    /// [Read more about the scroll register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#PPUSCROLL)
+    ///
+    /// [Read about how scroll interacts with W and T on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_scrolling#PPU_internal_registers)
     pub fn write_scroll(&mut self, b: u8) {
         let fine = b & 0b00000111;
         let coarse = b >> 3;
@@ -296,7 +608,17 @@ impl Ppu {
         self.w_latch = !self.w_latch;
     }
 
-    pub fn set_ctrl(&mut self, b: u8) {
+    /// Sets the value of the ctrl register.
+    ///
+    /// This updates the current nametable, the sprite pattern table, the tile pattern table,
+    /// sprite sizes, and the automatic address increment. The nametable select bits are also
+    /// copied into the internal T register.
+    ///
+    /// Note that, to emulate the short-circuiting behavior of the NES when bit 6 of ctrl
+    /// is set, calling `write_ctrl()` with a value that has bit 6 set will induce a panic.
+    ///
+    /// [Read more about the ctrl register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#PPUCTRL)
+    pub fn write_ctrl(&mut self, b: u8) {
         // TODO: bit 0 race condition
         assert_eq!((b & PPUCTRL_MSS), 0, "PPUCTRL bit 6 set; system short");
         self.ctrl = b;
@@ -305,10 +627,38 @@ impl Ppu {
         self.t_reg |= nametable_bits << NAMETABLE_SELECT_OFFSET;
     }
 
-    pub fn set_mask(&mut self, b: u8) {
+    /// Sets the value of the mask register.
+    ///
+    /// This controls greyscale, sprite rendering, tile rendering, sprite
+    /// rendering in the leftmost 8 pixels, tile rendering in the leftmost 8 pixels,
+    /// and color emphasis.
+    ///
+    /// [Read more about the mask register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#PPUMASK)
+    pub fn write_mask(&mut self, b: u8) {
         self.mask = b;
     }
 
+    /// Get info about the current PPU status for the frame.
+    ///
+    /// Returns a bitset containing 3 flags. The remaining 5 bits have unspecified values.
+    /// The flags are as follows:
+    /// * Bit 5: Supposed to indicate that this frame, the PPU has evaluated a scanline where
+    /// more than 8 sprites would have to be drawn, resulting in dropout. This flag is bugged and
+    /// does not work intuitively, which this library emulates (this flag is currently unimplemented).
+    /// * Bit 6: Indicates that this frame, a non-transparent pixel of the sprite in OAM index 0
+    /// has overlapped with a non-transparent pixel of a tile.
+    /// * Bit 7: Indicates whether the PPU currently in vblank. This flag is cleared after calling
+    /// `read_status()`. Additionally, due to race conditions, this flag is bugged on actual NES
+    /// hardware. For authenticity, try to rely on [`Ppu::tick_to_next_vblank()`] instead.
+    ///
+    /// Calling `read_status()` also clears the W latch, which affects future calls to
+    /// [`Ppu::write_addr()`] and [`Ppu::write_scroll()`].
+    ///
+    /// [Read more about the status register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#PPUSTATUS)
+    ///
+    /// [Read more about the bugged sprite overflow flag on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_sprite_evaluation#Cause_of_the_sprite_overflow_bug)
+    ///
+    /// [Read more about the W latch on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_scrolling#PPU_internal_registers)
     pub fn read_status(&mut self) -> u8 {
         let ret = self.status;
         self.status &= !PPUSTATUS_VBLANK;
@@ -510,7 +860,7 @@ impl Ppu {
         }
     }
 
-    fn output_pixel<B: PpuPixelBuffer>(&self, buffer: &mut B, color: Color) {
+    fn output_pixel<B: PixelBuffer>(&self, buffer: &mut B, color: Color) {
         let color = color & self.greyscale_mask();
         let emphasis = ColorEmphasis {
             bits: self.mask >> 5,
@@ -701,7 +1051,7 @@ impl Ppu {
         }
     }
 
-    fn tick_render<M: Mapper, B: PpuPixelBuffer>(
+    fn tick_render<M: Mapper, B: PixelBuffer>(
         &mut self,
         mapper: &mut M,
         buffer: &mut B,

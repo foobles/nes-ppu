@@ -173,6 +173,7 @@ pub struct Ppu {
     v_reg: u16,
     fine_x_scroll: u8, // 3 bits,
     w_latch: bool,
+    read_buffer: u8,
 
     sprite_0_cur_line: bool,
     sprite_0_next_line: bool,
@@ -412,6 +413,7 @@ impl Ppu {
             v_reg: 0,
             fine_x_scroll: 0,
             w_latch: false,
+            read_buffer: 0,
             sprite_0_cur_line: false,
             sprite_0_next_line: false,
             secondary_oam: [Sprite::default(); 8],
@@ -665,13 +667,163 @@ impl Ppu {
         ret
     }
 
-    // will be used later when implementing ppuaddr and ppudata
-    #[allow(unused)]
-    fn address_increment(&self) -> u16 {
-        match self.ctrl & PPUCTRL_ADDR_INC {
-            0 => 1,
-            _ => 32,
+    /// Reads the value at the currently stored address.
+    ///
+    /// This function reads the value at the location specified by the current address stored
+    /// in the PPU, but does not necessarily return that value. The address is usually
+    /// set up by calling [`Ppu::write_addr()`]. If the current address is in the
+    /// range 0x0000..=0x3EFF, then this function will return the value stored in an internal read
+    /// buffer, then perform the memory fetch through the [`Mapper::read()`] method of `mapper`,
+    /// and update the internal read buffer with the result.
+    ///
+    /// After the read is performed, the current address will automatically increment by either
+    /// 1 or 32, depending on the value in the [ctrl](Ppu::write_ctrl) register.
+    ///
+    /// ```
+    /// # use nes_ppu::*;
+    /// # struct Dummy;
+    /// # impl Mapper for Dummy {
+    /// #     fn read(&mut self, addr: u16) -> u8 { 0 }
+    /// #     fn write(&mut self, addr: u16, value: u8) {}
+    /// # }
+    /// # fn main() {
+    /// # let mut ppu = Ppu::new();
+    /// # let mut mapper = Dummy;
+    /// ppu.write_ctrl(0); // set automatic increment to 1
+    /// // set address to 0x2000
+    /// ppu.write_addr(0x20);
+    /// ppu.write_addr(0x00);
+    ///
+    /// // Discard whatever is currently in the read buffer.
+    /// // Then update read buffer with value in 0x2000 and increment address to 0x2001.
+    /// _ = ppu.read_data(&mut mapper);
+    ///
+    /// // Set n to the value fetched from 0x2000 in the previous read.
+    /// // Then update read buffer with value in 0x2001 and increment address to 0x2002
+    /// let n = ppu.read_data(&mut mapper);
+    ///
+    /// // Set m to the value fetched from 0x2001 in the previous read.
+    /// // Then update read buffer with value in 0x2002 and increment address to 0x2003
+    /// let m = ppu.read_data(&mut mapper);
+    /// # }
+    /// ```
+    ///
+    /// If the address is in the range 0x3F00..=0x3FFF, then this function will directly
+    /// return the value stored within internal palette memory at that address. However, the
+    /// internal read buffer is still updated with the value obtained from [`Mapper::read()`]
+    /// on `mapper`.
+    /// ```
+    /// # use nes_ppu::*;
+    /// # struct Dummy;
+    /// # impl Mapper for Dummy {
+    /// #     fn read(&mut self, addr: u16) -> u8 { 0 }
+    /// #     fn write(&mut self, addr: u16, value: u8) {}
+    /// # }
+    /// # fn main() {
+    /// # let mut ppu = Ppu::new();
+    /// # let mut mapper = Dummy;
+    /// ppu.write_ctrl(0); // set automatic increment to 1
+    /// // set address to 0x3F00
+    /// ppu.write_addr(0x3F);
+    /// ppu.write_addr(0x00);
+    ///
+    /// // Set n to value in palette memory at 0x3F00.
+    /// // Update read buffer to mapper.read(0x3F00), and increment address to 0x3F01.
+    /// let n = ppu.read_data(&mut mapper);
+    /// # }
+    /// ```
+    /// The address that is actually accessed is the low 14 bits of the internal V register.
+    /// The 15th bit is completely ignored by `read_data()`, and the automatic address increment
+    /// will not carry into the 15th bit.
+    ///
+    /// [Read more about the data register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#PPUDATA)
+    ///
+    /// [Read more about the internal V register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_scrolling#PPU_internal_registers)
+    pub fn read_data<M: Mapper>(&mut self, mapper: &mut M) -> u8 {
+        let effective_addr = self.v_reg & 0x3FFF;
+        self.increment_address();
+        if let Some(color) = self.access_palette_ram_mut(effective_addr) {
+            *color
+        } else {
+            std::mem::replace(&mut self.read_buffer, mapper.read(effective_addr))
         }
+    }
+
+    /// Writes to the value at the currently stored address.
+    ///
+    /// This function will write `value` to the location specified by the current address
+    /// stored in the PPU. The address is usually set up using [`Ppu::write_addr()`].
+    /// If the current address is in the range 0x0000..=0x3EFF, the write will invoke
+    /// the [`Mapper::write()`] method of `mapper`. Otherwise, if the address is in the range
+    /// 0x3F00..=0x3FFF, the mapper will not be accessed and the write will instead be directed
+    /// into internal palette memory.
+    ///
+    /// After the write is performed, the current address will automatically increment by either
+    /// 1 or 32, depending on the value in the [ctrl](Ppu::write_ctrl) register.
+    ///
+    /// ```
+    /// # use nes_ppu::*;
+    /// # struct Dummy;
+    /// # impl Mapper for Dummy {
+    /// #     fn read(&mut self, addr: u16) -> u8 { 0 }
+    /// #     fn write(&mut self, addr: u16, value: u8) {}
+    /// # }
+    /// # fn main() {
+    /// # let mut ppu = Ppu::new();
+    /// # let mut mapper = Dummy;
+    /// ppu.write_ctrl(0); // set automatic increment to 1
+    /// // set address to 0x2000
+    /// ppu.write_addr(0x20);
+    /// ppu.write_addr(0x00);
+    ///
+    /// ppu.write_data(&mut mapper, 10); // write 10 at address 0x2000
+    /// ppu.write_data(&mut mapper, 15); // write 15 at address 0x2001
+    /// # }
+    /// ```
+    /// The address that is actually accessed is the low 14 bits of the internal V register.
+    /// The 15th bit is completely ignored by `write_data()`, and the automatic address increment
+    /// will not carry into the 15th bit.
+    ///
+    /// [Read more about the data register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#PPUDATA)
+    ///
+    /// [Read more about the internal V register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_scrolling#PPU_internal_registers)
+    pub fn write_data<M: Mapper>(&mut self, mapper: &mut M, value: u8) {
+        let effective_addr = self.v_reg & 0x3FFF;
+        self.increment_address();
+        if let Some(color) = self.access_palette_ram_mut(effective_addr) {
+            *color = value;
+        } else {
+            mapper.write(effective_addr, value);
+        }
+    }
+
+    fn access_palette_ram_mut(&mut self, addr: u16) -> Option<&mut u8> {
+        if addr < 0x3F00 {
+            return None;
+        }
+
+        let color_index = (addr & 0b11) as usize;
+        let palette_index = ((addr >> 2) & 0b11) as usize;
+        let is_tile_color = (addr & 0b10000) == 0;
+        Some(if color_index == 0 {
+            &mut self.zero_colors[palette_index]
+        } else if is_tile_color {
+            &mut self.tile_palettes[palette_index].colors[color_index - 1]
+        } else {
+            &mut self.sprite_palettes[palette_index].colors[color_index - 1]
+        })
+    }
+
+    fn increment_address(&mut self) {
+        let new_addr = self.v_reg
+            + match self.ctrl & PPUCTRL_ADDR_INC {
+                0 => 1,
+                _ => 32,
+            };
+
+        self.v_reg ^= new_addr;
+        self.v_reg &= 0xC000;
+        self.v_reg ^= new_addr;
     }
 
     fn sprite_height(&self) -> u8 {

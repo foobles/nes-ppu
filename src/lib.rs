@@ -664,6 +664,7 @@ impl Ppu {
     pub fn read_status(&mut self) -> u8 {
         let ret = self.status;
         self.status &= !PPUSTATUS_VBLANK;
+        self.w_latch = false;
         ret
     }
 

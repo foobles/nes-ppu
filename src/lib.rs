@@ -163,7 +163,7 @@ pub struct Ppu {
     oam: [Sprite; 64],
     sprite_palettes: [Palette; 4],
     tile_palettes: [Palette; 4],
-    background_color: Color,
+    zero_colors: [Color; 4],
 
     ctrl: u8,
     mask: u8,
@@ -404,7 +404,7 @@ impl Ppu {
             oam: [Sprite::default(); 64],
             sprite_palettes: [Palette::default(); 4],
             tile_palettes: [Palette::default(); 4],
-            background_color: 0,
+            zero_colors: [0; 4],
             ctrl: 0,
             mask: 0,
             status: 0,
@@ -818,6 +818,10 @@ impl Ppu {
         }
     }
 
+    fn background_color(&self) -> Color {
+        self.zero_colors[0]
+    }
+
     fn calculate_cur_pixel(&self) -> PixelInfo {
         let tile_attribute = (self.tile_attribute_shift_reg >> (2 * self.fine_x_scroll)) & 0b11;
         let tile_color_index = if self.are_tiles_visible() {
@@ -844,7 +848,7 @@ impl Ppu {
                 let sprite_color_index = (s.pattern_shift_reg & 0b11) as usize;
                 self.sprite_palettes[sprite_palette_index].colors[sprite_color_index - 1]
             }
-            (_, 0) => self.background_color,
+            (_, 0) => self.background_color(),
             (_, _) => self.tile_palettes[tile_attribute].colors[tile_color_index - 1],
         };
         let sprite_0_hit = self.sprite_0_cur_line
@@ -1057,7 +1061,7 @@ impl Ppu {
     ) {
         if !self.is_rendering_enabled() {
             if mode == RenderMode::Normal {
-                self.output_pixel(buffer, self.background_color);
+                self.output_pixel(buffer, self.background_color());
             }
             return;
         }

@@ -682,14 +682,7 @@ impl Ppu {
     ///
     /// ```
     /// # use nes_ppu::*;
-    /// # struct Dummy;
-    /// # impl Mapper for Dummy {
-    /// #     fn read(&mut self, addr: u16) -> u8 { 0 }
-    /// #     fn write(&mut self, addr: u16, value: u8) {}
-    /// # }
-    /// # fn main() {
-    /// # let mut ppu = Ppu::new();
-    /// # let mut mapper = Dummy;
+    /// # fn example(mut ppu: Ppu, mut mapper: impl Mapper) {
     /// ppu.write_ctrl(0); // set automatic increment to 1
     /// // set address to 0x2000
     /// ppu.write_addr(0x20);
@@ -715,14 +708,7 @@ impl Ppu {
     /// on `mapper`.
     /// ```
     /// # use nes_ppu::*;
-    /// # struct Dummy;
-    /// # impl Mapper for Dummy {
-    /// #     fn read(&mut self, addr: u16) -> u8 { 0 }
-    /// #     fn write(&mut self, addr: u16, value: u8) {}
-    /// # }
-    /// # fn main() {
-    /// # let mut ppu = Ppu::new();
-    /// # let mut mapper = Dummy;
+    /// # fn example(mut ppu: Ppu, mut mapper: impl Mapper) {
     /// ppu.write_ctrl(0); // set automatic increment to 1
     /// // set address to 0x3F00
     /// ppu.write_addr(0x3F);
@@ -764,14 +750,7 @@ impl Ppu {
     ///
     /// ```
     /// # use nes_ppu::*;
-    /// # struct Dummy;
-    /// # impl Mapper for Dummy {
-    /// #     fn read(&mut self, addr: u16) -> u8 { 0 }
-    /// #     fn write(&mut self, addr: u16, value: u8) {}
-    /// # }
-    /// # fn main() {
-    /// # let mut ppu = Ppu::new();
-    /// # let mut mapper = Dummy;
+    /// # fn example(mut ppu: Ppu, mut mapper: impl Mapper) {
     /// ppu.write_ctrl(0); // set automatic increment to 1
     /// // set address to 0x2000
     /// ppu.write_addr(0x20);
@@ -795,6 +774,35 @@ impl Ppu {
             *color = value;
         } else {
             mapper.write(effective_addr, value);
+        }
+    }
+
+    /// Writes a sequence of bytes starting at the current address.
+    ///
+    /// Repeatedly calls [`Ppu::write_data()`] for each element of `values`. Because `write_data()`
+    /// automatically increments the current address, this will write each value into sequential
+    /// memory locations. Note that depending on the value in the [ctrl](Ppu::write_ctrl) register,
+    /// the values may be written consecutively or spaced apart by 32 bytes each.
+    ///
+    /// This is a convenience utility not actually present when programming for the NES.
+    /// ```
+    /// # use nes_ppu::*;
+    /// # fn example(mut ppu: Ppu, mut mapper: impl Mapper) {
+    /// ppu.write_ctrl(0b100); // set automatic increment to 32
+    /// // set address to 0x2000
+    /// ppu.write_addr(0x20);
+    /// ppu.write_addr(0x00);
+    ///
+    /// // Write to addresses 0x2000, 0x2020, 0x2040, 0x2060, and 0x2080.
+    /// ppu.write_data_iter(&mut mapper, [1, 2, 3, 4, 5]);
+    /// # }
+    /// ```
+    pub fn write_data_iter<M: Mapper, I>(&mut self, mapper: &mut M, values: I)
+    where
+        I: IntoIterator<Item = u8>,
+    {
+        for value in values {
+            self.write_data(mapper, value);
         }
     }
 

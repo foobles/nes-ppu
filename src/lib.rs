@@ -1155,12 +1155,10 @@ impl Ppu {
         let sprite_index = (((self.cur_dot - 1) >> 3) & 0b111) as usize;
         let sprite = self.secondary_oam[sprite_index];
 
-        match (self.cur_dot - 1) & 0b110 {
-            0b000 => {
-                // dummy nametable fetch 1
-            }
-            0b010 => {
-                // dummy nametable fetch 2
+        match (self.cur_dot - 1) & 0b111 {
+            0b000 | 0b010 => {
+                // dummy reads
+                mapper.read(self.nametable_address());
             }
             0b100 => {
                 self.temp_sprite_pattern_lo =
@@ -1263,6 +1261,10 @@ impl Ppu {
             }
             280..=304 if mode == RenderMode::PreRender => {
                 self.flush_vertical_scroll();
+            }
+            337 | 339 => {
+                // dummy reads
+                mapper.read(self.nametable_address());
             }
             _ => {}
         }

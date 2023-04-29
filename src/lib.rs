@@ -308,7 +308,7 @@ pub const PPUMASK_EMPH_GREEN: u8 = 1 << 6;
 /// Emphasize blue color output.
 pub const PPUMASK_EMPH_BLUE: u8 = 1 << 7;
 
-/// Sprite dropout has occurred this frame (unimplemented).
+/// Sprite dropout has occurred this frame (bugged).
 pub const PPUSTATUS_OVERFLOW: u8 = 1 << 5;
 /// A non-transparent pixel of sprite 0 has overlapped a non-transparent pixel of a tile this frame.
 pub const PPUSTATUS_SPRITE_0_HIT: u8 = 1 << 6;
@@ -646,7 +646,7 @@ impl Ppu {
     /// The flags are as follows:
     /// * Bit 5: Supposed to indicate that this frame, the PPU has evaluated a scanline where
     /// more than 8 sprites would have to be drawn, resulting in dropout. This flag is bugged and
-    /// does not work intuitively, which this library emulates (this flag is currently unimplemented).
+    /// does not work intuitively, which this library emulates.
     /// * Bit 6: Indicates that this frame, a non-transparent pixel of the sprite in OAM index 0
     /// has overlapped with a non-transparent pixel of a tile.
     /// * Bit 7: Indicates whether the PPU currently in vblank. This flag is cleared after calling
@@ -1097,12 +1097,19 @@ impl Ppu {
     }
 
     fn tick_sprite_evaluation(&mut self) {
-        // todo: sprite overflow checking
-        if self.is_secondary_oam_full() || self.is_sprite_evaluation_complete {
+        if self.is_sprite_evaluation_complete {
             return;
         }
 
         match self.oam_evaluation_index & 0b11 {
+            _ if self.is_secondary_oam_full() => {
+                if self.is_sprite_y_in_range(self.cur_oam_byte()) {
+                    self.status |= PPUSTATUS_OVERFLOW;
+                }
+                // emulate overflow increment bug
+                let inc = 0b101 - (((self.oam_evaluation_index & 0b11) + 1) & 0b100);
+                self.increment_oam_evaluation_index(inc);
+            }
             0b00 => {
                 let sprite_y = self.cur_oam_byte();
                 *self.cur_secondary_oam_byte_mut() = sprite_y;

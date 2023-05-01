@@ -180,9 +180,10 @@ pub struct Ppu {
 
     secondary_oam: [Sprite; 8],
     sprite_render_states: [SpriteRenderState; 8],
+    oam_mdr: u8,
     oam_evaluation_index: u8,
     secondary_oam_evaluation_index: u8,
-    is_sprite_evaluation_complete: bool,
+    sprite_evaluation_state: SpriteEvaluationState,
     temp_sprite_pattern_lo: u8,
 
     tile_pattern_shift_reg: u32,   // four 8-bit shift registers
@@ -209,6 +210,14 @@ struct SpriteRenderState {
 enum RenderMode {
     Normal,
     PreRender,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum SpriteEvaluationState {
+    CheckingNormal,
+    CheckingOverflow,
+    Copying(u8),
+    Complete,
 }
 
 /// Memory map used by the PPU to access video memory.
@@ -418,9 +427,10 @@ impl Ppu {
             sprite_0_next_line: false,
             secondary_oam: [Sprite::default(); 8],
             sprite_render_states: [SpriteRenderState::default(); 8],
+            oam_mdr: 0,
             oam_evaluation_index: 0,
             secondary_oam_evaluation_index: 0,
-            is_sprite_evaluation_complete: false,
+            sprite_evaluation_state: SpriteEvaluationState::CheckingNormal,
             temp_sprite_pattern_lo: 0,
             tile_pattern_shift_reg: 0,
             tile_attribute_shift_reg: 0,
@@ -1076,10 +1086,12 @@ impl Ppu {
     }
 
     fn increment_oam_evaluation_index(&mut self, n: u8) {
-        (
-            self.oam_evaluation_index,
-            self.is_sprite_evaluation_complete,
-        ) = self.oam_evaluation_index.overflowing_add(n);
+        let (new_index, done) = self.oam_evaluation_index.overflowing_add(n);
+        self.oam_evaluation_index = new_index;
+        if done {
+            self.sprite_evaluation_state = SpriteEvaluationState::Complete;
+            self.oam_evaluation_index &= !0b11;
+        }
     }
 
     fn is_sprite_y_in_range(&self, y: u8) -> bool {
@@ -1089,44 +1101,77 @@ impl Ppu {
     }
 
     fn tick_clear_secondary_oam(&mut self) {
-        // writes only occur on even cycles, starting on cycle 1.
-        // Therefore, cycle 2 is the first cycle where a write occurs.
-        // So we can calculate the index by dividing cur_dot by 2 and subtracting 1.
-        let i = ((self.cur_dot - 1) >> 1) as usize;
-        self.secondary_oam_bytes_mut()[i] = 0xFF;
+        if self.cur_dot & 1 == 0 {
+            // writes only occur on even cycles, starting on cycle 1.
+            // Therefore, cycle 2 is the first cycle where a write occurs.
+            // So we can calculate the index by dividing cur_dot by 2 and subtracting 1.
+            let i = ((self.cur_dot - 1) >> 1) as usize;
+            self.secondary_oam_bytes_mut()[i] = self.oam_mdr;
+        } else {
+            self.oam_mdr = 0xFF;
+        }
+    }
+
+    fn tick_sprite_evaluation_check_normal(&mut self) {
+        let sprite_y = self.oam_mdr;
+        let sprite_in_range = self.is_sprite_y_in_range(sprite_y);
+        *self.cur_secondary_oam_byte_mut() = sprite_y;
+        if sprite_in_range {
+            self.sprite_0_next_line |= self.oam_evaluation_index == 0;
+            self.sprite_evaluation_state = SpriteEvaluationState::Copying(2);
+            self.secondary_oam_evaluation_index += 1;
+            self.increment_oam_evaluation_index(1);
+        } else {
+            self.increment_oam_evaluation_index(SPRITE_SIZE);
+        }
+    }
+
+    fn tick_sprite_evaluation_check_overflow(&mut self) {
+        let sprite_y = self.oam_mdr;
+        let sprite_in_range = self.is_sprite_y_in_range(sprite_y);
+        if sprite_in_range {
+            self.status |= PPUSTATUS_OVERFLOW;
+            self.sprite_evaluation_state = SpriteEvaluationState::Copying(2);
+            self.increment_oam_evaluation_index(1);
+        } else {
+            // emulate overflow increment bug
+            let inc = 0b101 - (((self.oam_evaluation_index & 0b11) + 1) & 0b100);
+            self.increment_oam_evaluation_index(inc);
+        }
+    }
+
+    fn tick_sprite_evaluation_copy(&mut self, remaining: u8) {
+        if !self.is_secondary_oam_full() {
+            *self.cur_secondary_oam_byte_mut() = self.oam_mdr;
+            self.secondary_oam_evaluation_index += 1;
+        }
+
+        self.sprite_evaluation_state = if remaining > 0 {
+            SpriteEvaluationState::Copying(remaining - 1)
+        } else if !self.is_secondary_oam_full() {
+            SpriteEvaluationState::CheckingNormal
+        } else {
+            SpriteEvaluationState::CheckingOverflow
+        };
+
+        self.increment_oam_evaluation_index(1);
+    }
+
+    fn tick_sprite_evaluation_complete(&mut self) {
+        self.increment_oam_evaluation_index(SPRITE_SIZE);
     }
 
     fn tick_sprite_evaluation(&mut self) {
-        if self.is_sprite_evaluation_complete {
-            return;
-        }
-
-        match self.oam_evaluation_index & 0b11 {
-            _ if self.is_secondary_oam_full() => {
-                if self.is_sprite_y_in_range(self.cur_oam_byte()) {
-                    self.status |= PPUSTATUS_OVERFLOW;
-                }
-                // emulate overflow increment bug
-                let inc = 0b101 - (((self.oam_evaluation_index & 0b11) + 1) & 0b100);
-                self.increment_oam_evaluation_index(inc);
+        use SpriteEvaluationState::*;
+        if self.cur_dot & 1 == 0 {
+            match self.sprite_evaluation_state {
+                CheckingNormal => self.tick_sprite_evaluation_check_normal(),
+                CheckingOverflow => self.tick_sprite_evaluation_check_overflow(),
+                Copying(remaining) => self.tick_sprite_evaluation_copy(remaining),
+                Complete => self.tick_sprite_evaluation_complete(),
             }
-            0b00 => {
-                let sprite_y = self.cur_oam_byte();
-                *self.cur_secondary_oam_byte_mut() = sprite_y;
-
-                if self.is_sprite_y_in_range(sprite_y) {
-                    self.sprite_0_next_line |= self.oam_evaluation_index == 0;
-                    self.increment_oam_evaluation_index(1);
-                    self.secondary_oam_evaluation_index += 1;
-                } else {
-                    self.increment_oam_evaluation_index(SPRITE_SIZE);
-                }
-            }
-            _ => {
-                *self.cur_secondary_oam_byte_mut() = self.cur_oam_byte();
-                self.increment_oam_evaluation_index(1);
-                self.secondary_oam_evaluation_index += 1;
-            }
+        } else {
+            self.oam_mdr = self.cur_oam_byte();
         }
     }
 
@@ -1155,49 +1200,60 @@ impl Ppu {
         let sprite_index = (((self.cur_dot - 1) >> 3) & 0b111) as usize;
         let sprite = self.secondary_oam[sprite_index];
 
+        // default read value used for cycles 4-8
+        self.oam_mdr = sprite.x;
+
         match (self.cur_dot - 1) & 0b111 {
-            0b000 | 0b010 => {
-                // dummy reads
+            0b000 => {
+                // dummy read
                 mapper.read(self.nametable_address());
+                self.oam_mdr = sprite.y;
+            }
+            0b001 => {
+                self.oam_mdr = sprite.pattern_index;
+            }
+            0b010 => {
+                // dummy read
+                mapper.read(self.nametable_address());
+                self.oam_mdr = sprite.attributes;
+                self.sprite_render_states[sprite_index].attributes = sprite.attributes;
+            }
+            0b011 => {
+                self.sprite_render_states[sprite_index].x_counter = sprite.x;
             }
             0b100 => {
                 self.temp_sprite_pattern_lo =
                     self.fetch_sprite_pattern(mapper, sprite, BitPlane::Lo);
-
-                let cur_render_state = &mut self.sprite_render_states[sprite_index];
-                cur_render_state.attributes = sprite.attributes;
             }
             0b110 => {
                 let pattern_hi = self.fetch_sprite_pattern(mapper, sprite, BitPlane::Hi);
                 let pattern = morton_encode_16(self.temp_sprite_pattern_lo, pattern_hi);
-
-                let cur_render_state = &mut self.sprite_render_states[sprite_index];
-                cur_render_state.pattern_shift_reg = pattern;
-                cur_render_state.x_counter = sprite.x;
+                self.sprite_render_states[sprite_index].pattern_shift_reg = pattern;
             }
             _ => {}
         }
     }
 
     fn tick_sprites<M: Mapper>(&mut self, mapper: &mut M) {
-        let even_cycle = self.cur_dot & 1 == 0;
-
         match self.cur_dot {
             0 => {
                 self.oam_evaluation_index = 0;
                 self.secondary_oam_evaluation_index = 0;
-                self.is_sprite_evaluation_complete = false;
+                self.sprite_evaluation_state = SpriteEvaluationState::CheckingNormal;
                 self.sprite_0_cur_line = self.sprite_0_next_line;
                 self.sprite_0_next_line = false;
             }
-            1..=64 if even_cycle => {
+            1..=64 => {
                 self.tick_clear_secondary_oam();
             }
-            65..=256 if even_cycle => {
+            65..=256 => {
                 self.tick_sprite_evaluation();
             }
             257..=320 => {
                 self.tick_sprite_fetches(mapper);
+            }
+            321..=340 => {
+                self.oam_mdr = self.secondary_oam_bytes()[0];
             }
             _ => {}
         }

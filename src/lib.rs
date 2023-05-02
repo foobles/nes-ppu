@@ -1303,6 +1303,9 @@ impl Ppu {
                 self.output_pixel(buffer, pixel_info.color);
                 self.update_sprite_counters_and_shift_regs();
             }
+        } else if self.cur_dot > 256 {
+            // garbage sprite fetching during pre-render scanline
+            self.tick_sprites(mapper);
         }
 
         match self.cur_dot {

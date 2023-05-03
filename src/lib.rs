@@ -184,6 +184,7 @@ pub struct Ppu {
     oam_evaluation_index: u8,
     secondary_oam_evaluation_index: u8,
     sprite_evaluation_state: SpriteEvaluationState,
+    oam_evaluation_index_overflow: bool,
     temp_sprite_pattern_lo: u8,
 
     tile_pattern_shift_reg: u32,   // four 8-bit shift registers
@@ -216,7 +217,8 @@ enum RenderMode {
 enum SpriteEvaluationState {
     CheckingNormal,
     CheckingOverflow,
-    Copying(u8),
+    CopyingNormal(u8),
+    CopyingOverflow(u8),
     Complete,
 }
 
@@ -431,6 +433,7 @@ impl Ppu {
             oam_evaluation_index: 0,
             secondary_oam_evaluation_index: 0,
             sprite_evaluation_state: SpriteEvaluationState::CheckingNormal,
+            oam_evaluation_index_overflow: false,
             temp_sprite_pattern_lo: 0,
             tile_pattern_shift_reg: 0,
             tile_attribute_shift_reg: 0,
@@ -1086,12 +1089,10 @@ impl Ppu {
     }
 
     fn increment_oam_evaluation_index(&mut self, n: u8) {
-        let (new_index, done) = self.oam_evaluation_index.overflowing_add(n);
-        self.oam_evaluation_index = new_index;
-        if done {
-            self.sprite_evaluation_state = SpriteEvaluationState::Complete;
-            self.oam_evaluation_index &= !0b11;
-        }
+        (
+            self.oam_evaluation_index,
+            self.oam_evaluation_index_overflow,
+        ) = self.oam_evaluation_index.overflowing_add(n);
     }
 
     fn is_sprite_y_in_range(&self, y: u8) -> bool {
@@ -1112,17 +1113,25 @@ impl Ppu {
         }
     }
 
+    fn complete_sprite_evaluation(&mut self) -> SpriteEvaluationState {
+        self.oam_evaluation_index &= !0b11;
+        SpriteEvaluationState::Complete
+    }
+
     fn tick_sprite_evaluation_check_normal(&mut self) {
         let sprite_y = self.oam_mdr;
         let sprite_in_range = self.is_sprite_y_in_range(sprite_y);
         *self.cur_secondary_oam_byte_mut() = sprite_y;
         if sprite_in_range {
             self.sprite_0_next_line |= self.oam_evaluation_index == 0;
-            self.sprite_evaluation_state = SpriteEvaluationState::Copying(2);
+            self.sprite_evaluation_state = SpriteEvaluationState::CopyingNormal(2);
             self.secondary_oam_evaluation_index += 1;
             self.increment_oam_evaluation_index(1);
         } else {
             self.increment_oam_evaluation_index(SPRITE_SIZE);
+            if self.oam_evaluation_index_overflow {
+                self.sprite_evaluation_state = self.complete_sprite_evaluation();
+            }
         }
     }
 
@@ -1131,30 +1140,44 @@ impl Ppu {
         let sprite_in_range = self.is_sprite_y_in_range(sprite_y);
         if sprite_in_range {
             self.status |= PPUSTATUS_OVERFLOW;
-            self.sprite_evaluation_state = SpriteEvaluationState::Copying(2);
+            self.sprite_evaluation_state = SpriteEvaluationState::CopyingOverflow(2);
             self.increment_oam_evaluation_index(1);
         } else {
             // emulate overflow increment bug
             let inc = 0b101 - (((self.oam_evaluation_index & 0b11) + 1) & 0b100);
             self.increment_oam_evaluation_index(inc);
+            if self.oam_evaluation_index_overflow {
+                self.sprite_evaluation_state = self.complete_sprite_evaluation();
+            }
         }
     }
 
-    fn tick_sprite_evaluation_copy(&mut self, remaining: u8) {
+    fn tick_sprite_evaluation_copy_normal(&mut self, remaining: u8) {
         if !self.is_secondary_oam_full() {
             *self.cur_secondary_oam_byte_mut() = self.oam_mdr;
             self.secondary_oam_evaluation_index += 1;
         }
+        self.increment_oam_evaluation_index(1);
 
         self.sprite_evaluation_state = if remaining > 0 {
-            SpriteEvaluationState::Copying(remaining - 1)
-        } else if !self.is_secondary_oam_full() {
-            SpriteEvaluationState::CheckingNormal
-        } else {
+            SpriteEvaluationState::CopyingNormal(remaining - 1)
+        } else if self.oam_evaluation_index_overflow {
+            self.complete_sprite_evaluation()
+        } else if self.is_secondary_oam_full() {
             SpriteEvaluationState::CheckingOverflow
+        } else {
+            SpriteEvaluationState::CheckingNormal
         };
+    }
 
+    fn tick_sprite_evaluation_copy_overflow(&mut self, remaining: u8) {
         self.increment_oam_evaluation_index(1);
+
+        self.sprite_evaluation_state = if remaining > 0 {
+            SpriteEvaluationState::CopyingOverflow(remaining - 1)
+        } else {
+            self.complete_sprite_evaluation()
+        };
     }
 
     fn tick_sprite_evaluation_complete(&mut self) {
@@ -1167,7 +1190,8 @@ impl Ppu {
             match self.sprite_evaluation_state {
                 CheckingNormal => self.tick_sprite_evaluation_check_normal(),
                 CheckingOverflow => self.tick_sprite_evaluation_check_overflow(),
-                Copying(remaining) => self.tick_sprite_evaluation_copy(remaining),
+                CopyingNormal(remaining) => self.tick_sprite_evaluation_copy_normal(remaining),
+                CopyingOverflow(remaining) => self.tick_sprite_evaluation_copy_overflow(remaining),
                 Complete => self.tick_sprite_evaluation_complete(),
             }
         } else {
@@ -1240,6 +1264,7 @@ impl Ppu {
                 self.oam_evaluation_index = 0;
                 self.secondary_oam_evaluation_index = 0;
                 self.sprite_evaluation_state = SpriteEvaluationState::CheckingNormal;
+                self.oam_evaluation_index_overflow = false;
                 self.sprite_0_cur_line = self.sprite_0_next_line;
                 self.sprite_0_next_line = false;
             }

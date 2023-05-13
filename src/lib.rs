@@ -512,7 +512,8 @@ impl Ppu {
 
     /// Overwrites the contents of [OAM] with the given sprite array.
     ///
-    /// This is a convenience utility not actually provided when programming for the NES.
+    /// This is a convenience utility meant to partially replicate the behavior of OAM DMA on the
+    /// actual NES, but it is not emulated precisely.
     ///
     /// [OAM]: Ppu#oam
     pub fn set_oam(&mut self, sprites: [Sprite; 64]) {
@@ -521,7 +522,8 @@ impl Ppu {
 
     /// Overwrites the contents of [OAM] with the given byte array.
     ///
-    /// This is a convenience utility not actually provided when programming for the NES.
+    /// This is a convenience utility meant to partially replicate the behavior of OAM DMA on the
+    /// actual NES, but it is not emulated precisely.
     ///
     /// [OAM]: Ppu#oam
     pub fn set_oam_bytes(&mut self, bytes: [u8; 256]) {
@@ -819,6 +821,133 @@ impl Ppu {
         }
     }
 
+    /// Sets the current oam address.
+    ///
+    /// This function sets the PPU's current 8-bit address into [OAM](Ppu#oam).
+    /// Since this address is used internally during rendering to evaluate which sprites are
+    /// visible, writing to the OAM address in the middle of rendering can corrupt which sprites are
+    /// drawn. The current OAM address is also automatically reset to 0 towards the end of vblank.
+    ///
+    /// Due to internal hardware issues, writing to the OAM address can corrupt the
+    /// contents of OAM itself, which this library emulates. As a result, this function is useless
+    /// in a majority of cases.
+    ///
+    /// This function is most commonly used in conjunction with [`Ppu::write_oam_data()`] or
+    /// [`Ppu::read_oam_data()`] to access the contents of OAM. However, due to the aforementioned
+    /// issue where calling this function corrupts OAM, this is rarely practical.
+    /// ```
+    /// # use nes_ppu::*;
+    /// # fn example(mut ppu: Ppu) {
+    /// ppu.write_oam_addr(0x80);
+    /// ppu.write_oam_data(0xFF); // write value 0xFF to address 0x80
+    /// let n = ppu.read_oam_data(); // read value at address 0x81
+    /// # }
+    /// ```
+    /// In almost all cases, to write to OAM, it is better to use [`Ppu::set_oam()`] or
+    /// [`Ppu::set_oam_bytes()`] instead.
+    ///
+    /// [Read about the OAM addr register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#OAMADDR)
+    ///
+    /// [Read about the OAM memory layout on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_OAM)
+    pub fn write_oam_addr(&mut self, addr: u8) {
+        // Corrupt OAM unconditionally.
+        // While these corruptions don't happen 100% of the time on real hardware,
+        // this should force users to be careful.
+        for i in 0..8 {
+            let src_index = (0x20 + i) as usize;
+            let dest_index = self.oam_evaluation_index.wrapping_add(i) as usize;
+            let val = self.oam_bytes()[src_index];
+            self.oam_bytes_mut()[dest_index] = val;
+        }
+
+        self.oam_evaluation_index = addr;
+    }
+
+    /// Reads the value pointed to by the current OAM address.
+    ///
+    /// If the PPU is in vblank or rendering is disabled, then this function returns the value
+    /// referred to by the currently stored OAM address. Otherwise, the PPU is in a busy state
+    /// and this function will return the value most recently loaded by the PPU during
+    /// its internal sprite processing routine. Unlike [`Ppu::write_oam_data()`], this function
+    /// does not automatically increment the OAM address.
+    ///
+    /// ```
+    /// # use nes_ppu::*;
+    /// # fn example(mut ppu: Ppu) {
+    /// // assume ppu is in vblank
+    ///
+    /// // set current address to 0x55 (possibly causing OAM corruption)
+    /// ppu.write_oam_addr(0x55);
+    /// // read the value in OAM at address 0x55
+    /// let n = ppu.read_oam_data();
+    /// # }
+    /// ```
+    ///
+    /// ```
+    /// # use nes_ppu::*;
+    /// # fn example(mut ppu: Ppu) {
+    /// // assume ppu is currently rendering
+    ///
+    /// // snoop the value the PPU most recently read from OAM during internal sprite processing
+    /// let n = ppu.read_oam_data();
+    /// # }
+    /// ```
+    ///
+    /// See also: [`Ppu::write_oam_addr()`], [`Ppu::write_oam_data()`].
+    ///
+    /// [Read more about the OAM data register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#OAMDATA)
+    pub fn read_oam_data(&mut self) -> u8 {
+        if self.is_rendering() {
+            self.oam_mdr
+        }  else {
+            self.cur_oam_byte()
+        }
+    }
+
+    /// Writes data into OAM at the current address.
+    ///
+    /// If the PPU is in vblank or rendering is disabled, this function writes `value` into OAM
+    /// at the current OAM address, then increments the current address by 1. This increment may
+    /// cause an overflow from 0xFF back to address 0x00.
+    /// If the PPU is currently rendering, then no write is performed, and the current OAM address
+    /// is instead incremented by 4.
+    /// ```
+    /// # use nes_ppu::*;
+    /// # fn example(mut ppu: Ppu) {
+    /// // assume ppu is in vblank
+    ///
+    /// // set current address to 0x55 (possibly causing OAM corruption)
+    /// ppu.write_oam_addr(0x55);
+    /// // set the value in OAM at address 0x55 to 0xAA
+    /// ppu.write_oam_data(0xAA);
+    /// // set the value in OAM at address 0x56 to 0xBB
+    /// ppu.write_oam_data(0xBB);
+    /// # }
+    /// ```
+    ///
+    /// ```
+    /// # use nes_ppu::*;
+    /// # fn example(mut ppu: Ppu) {
+    /// // assume ppu is currently rendering
+    ///
+    /// // perform no write and increment OAM address by 4 (this will interfere with sprite processing)
+    /// ppu.write_oam_data(0xAA);
+    /// # }
+    /// ```
+    ///
+    /// See also: [`Ppu::write_oam_addr()`], [`Ppu::read_oam_data()`].
+    ///
+    /// [Read more about the OAM data register on the NESdev Wiki.](https://www.nesdev.org/wiki/PPU_registers#OAMDATA)
+    pub fn write_oam_data(&mut self, value: u8) {
+        if self.is_rendering() {
+            self.increment_oam_evaluation_index(SPRITE_SIZE);
+        } else {
+            let index = self.oam_evaluation_index as usize;
+            self.oam_bytes_mut()[index] = value;
+            self.increment_oam_evaluation_index(1);
+        }
+    }
+
     fn access_palette_ram_mut(&mut self, addr: u16) -> Option<&mut u8> {
         if addr < 0x3F00 {
             return None;
@@ -982,6 +1111,10 @@ impl Ppu {
 
     fn is_rendering_enabled(&self) -> bool {
         self.mask & PPUMASK_SHOW_TILES != 0 || self.mask & PPUMASK_SHOW_SPRITES != 0
+    }
+
+    fn is_rendering(&self) -> bool {
+        self.is_rendering_enabled() && (self.cur_scanline < 240 || self.cur_scanline == 261)
     }
 
     fn greyscale_mask(&self) -> u8 {
@@ -1261,7 +1394,6 @@ impl Ppu {
     fn tick_sprites<M: Mapper>(&mut self, mapper: &mut M) {
         match self.cur_dot {
             0 => {
-                self.oam_evaluation_index = 0;
                 self.secondary_oam_evaluation_index = 0;
                 self.sprite_evaluation_state = SpriteEvaluationState::CheckingNormal;
                 self.oam_evaluation_index_overflow = false;
@@ -1275,6 +1407,7 @@ impl Ppu {
                 self.tick_sprite_evaluation();
             }
             257..=320 => {
+                self.oam_evaluation_index = 0;
                 self.tick_sprite_fetches(mapper);
             }
             321..=340 => {

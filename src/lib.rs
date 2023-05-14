@@ -410,6 +410,18 @@ fn morton_encode_16(lo: u8, hi: u8) -> u16 {
     x | (y << 1)
 }
 
+fn palette_address_color_index(addr: u16) -> usize {
+    (addr & 0b11) as usize
+}
+
+fn palette_address_palette_index(addr: u16) -> usize {
+    ((addr >> 2) & 0b11) as usize
+}
+
+fn is_palette_address_tile_color(addr: u16) -> bool {
+    (addr & 0b10000) == 0
+}
+
 impl Ppu {
     /// Creates a new PPU instance in an unspecified state.
     pub fn new() -> Self {
@@ -963,17 +975,32 @@ impl Ppu {
         }
     }
 
+    fn access_palette_ram(&mut self, addr: u16) -> Option<u8> {
+        if addr < 0x3F00 {
+            return None;
+        }
+
+        let color_index = palette_address_color_index(addr);
+        let palette_index = palette_address_palette_index(addr);
+        Some(if color_index == 0 {
+            self.zero_colors[palette_index]
+        } else if is_palette_address_tile_color(addr) {
+            self.tile_palettes[palette_index].colors[color_index - 1]
+        } else {
+            self.sprite_palettes[palette_index].colors[color_index - 1]
+        })
+    }
+
     fn access_palette_ram_mut(&mut self, addr: u16) -> Option<&mut u8> {
         if addr < 0x3F00 {
             return None;
         }
 
-        let color_index = (addr & 0b11) as usize;
-        let palette_index = ((addr >> 2) & 0b11) as usize;
-        let is_tile_color = (addr & 0b10000) == 0;
+        let color_index = palette_address_color_index(addr);
+        let palette_index = palette_address_palette_index(addr);
         Some(if color_index == 0 {
             &mut self.zero_colors[palette_index]
-        } else if is_tile_color {
+        } else if is_palette_address_tile_color(addr) {
             &mut self.tile_palettes[palette_index].colors[color_index - 1]
         } else {
             &mut self.sprite_palettes[palette_index].colors[color_index - 1]
@@ -1455,8 +1482,11 @@ impl Ppu {
         mode: RenderMode,
     ) {
         if !self.is_rendering_enabled() {
-            if mode == RenderMode::Normal {
-                self.output_pixel(buffer, self.background_color());
+            if self.cur_dot < 256 && mode == RenderMode::Normal {
+                let color = self
+                    .access_palette_ram(self.v_reg & 0x3FFF)
+                    .unwrap_or(self.background_color());
+                self.output_pixel(buffer, color);
             }
             return;
         }

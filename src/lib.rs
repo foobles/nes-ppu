@@ -198,6 +198,7 @@ pub struct Ppu {
 
     cur_scanline: u16,
     cur_dot: u16,
+    is_even_frame: bool,
 }
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -442,8 +443,9 @@ impl Ppu {
             temp_tile_attribute: 0,
             temp_tile_pattern_lo: 0,
             temp_tile_pattern_hi: 0,
-            cur_scanline: 0,
+            cur_scanline: 261,
             cur_dot: 0,
+            is_even_frame: false,
         }
     }
 
@@ -457,11 +459,24 @@ impl Ppu {
             _ => unreachable!(),
         }
 
-        if self.cur_dot < 340 {
-            self.cur_dot += 1;
-        } else {
-            self.cur_dot = 0;
-            self.cur_scanline = (self.cur_scanline + 1) % 262;
+        match self.cur_dot {
+            339 if self.cur_scanline == 261 => {
+                if !self.is_even_frame && self.is_rendering_enabled() {
+                    self.cur_dot = 0;
+                    self.cur_scanline = 0;
+                } else {
+                    self.cur_dot += 1;
+                }
+                self.is_even_frame = !self.is_even_frame;
+            }
+            0..=339 => {
+                self.cur_dot += 1;
+            }
+            340 => {
+                self.cur_dot = 0;
+                self.cur_scanline = (self.cur_scanline + 1) % 262;
+            }
+            _ => unreachable!()
         }
     }
 

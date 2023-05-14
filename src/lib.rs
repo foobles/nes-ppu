@@ -488,7 +488,7 @@ impl Ppu {
                 self.cur_dot = 0;
                 self.cur_scanline = (self.cur_scanline + 1) % 262;
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
@@ -926,7 +926,7 @@ impl Ppu {
     pub fn read_oam_data(&mut self) -> u8 {
         if self.is_rendering() {
             self.oam_mdr
-        }  else {
+        } else {
             self.cur_oam_byte()
         }
     }

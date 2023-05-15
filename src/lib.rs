@@ -243,10 +243,9 @@ enum SpriteEvaluationState {
 /// are mapped to.
 ///
 /// The address range `0x3F00..=0x3F1F` and all subsequent addresses up to `0x3FFF` always
-/// map to internal palette memory, although the PPU does not access these addresses through
-/// the mapper when rendering.
-/// If you map these addresses in an implementation of `Mapper`, they will always be
-/// ignored, since them mapping to palette memory is done within the PPU itself.
+/// map to internal palette memory. On its own, the PPU will never access the mapper to read or
+/// write to addresses in this range. The only situation where the mapper can be accessed with an
+/// address in `0x3F00..=0x3FFF` is via a call to [`Ppu::read_data()`].
 ///
 /// Read more on the NESdev Wiki:
 /// * [PPU memory map](https://www.nesdev.org/wiki/PPU_memory_map)
@@ -771,11 +770,8 @@ impl Ppu {
     pub fn read_data<M: Mapper>(&mut self, mapper: &mut M) -> u8 {
         let effective_addr = self.v_reg & 0x3FFF;
         self.increment_address();
-        if let Some(color) = self.access_palette_ram_mut(effective_addr) {
-            *color
-        } else {
-            std::mem::replace(&mut self.read_buffer, mapper.read(effective_addr))
-        }
+        let data = std::mem::replace(&mut self.read_buffer, mapper.read(effective_addr));
+        self.access_palette_ram(effective_addr).unwrap_or(data)
     }
 
     /// Writes to the value at the currently stored address.
@@ -813,7 +809,7 @@ impl Ppu {
         let effective_addr = self.v_reg & 0x3FFF;
         self.increment_address();
         if let Some(color) = self.access_palette_ram_mut(effective_addr) {
-            *color = value;
+            *color = value & 0x3F;
         } else {
             mapper.write(effective_addr, value);
         }
@@ -1161,7 +1157,7 @@ impl Ppu {
 
     fn greyscale_mask(&self) -> u8 {
         if self.mask & PPUMASK_GREYSCALE == 0 {
-            0xFF
+            0x3F
         } else {
             0x30
         }

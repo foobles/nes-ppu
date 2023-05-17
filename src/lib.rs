@@ -50,6 +50,8 @@
 //!     }
 //! }
 
+#[cfg(test)]
+mod tests;
 use bytemuck::{Pod, Zeroable};
 
 /// A number corresponding to a color.

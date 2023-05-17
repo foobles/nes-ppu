@@ -50,6 +50,7 @@
 //!     }
 //! }
 
+#![no_std]
 #[cfg(test)]
 mod tests;
 use bytemuck::{Pod, Zeroable};
@@ -772,7 +773,7 @@ impl Ppu {
     pub fn read_data<M: Mapper>(&mut self, mapper: &mut M) -> u8 {
         let effective_addr = self.v_reg & 0x3FFF;
         self.increment_address();
-        let data = std::mem::replace(&mut self.read_buffer, mapper.read(effective_addr));
+        let data = core::mem::replace(&mut self.read_buffer, mapper.read(effective_addr));
         self.access_palette_ram(effective_addr).unwrap_or(data)
     }
 

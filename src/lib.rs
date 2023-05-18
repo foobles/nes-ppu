@@ -7,48 +7,88 @@
 
 //! A NES graphics emulator with a Rust interface.
 //!
-//! This library provides a generic interface for a NES graphics emulator that mimics the interface
-//! provided on the actual system. In addition, this library also provides some conveniences not
-//! present on the NES in order to make programming more ergonomic.
+//! This library emulates the NTSC NES PPU (2c02), and provides a generic interface mimicking the
+//! interface that exists on actual NES hardware. In addition, the interface also contains some
+//! conveniences not available on the NES in order to make programming more ergonomic.
 //!
-//! ```no_run
-//! use nes_ppu::Ppu;
-//! # use nes_ppu::*;
-//! # struct NesMemoryMapper;
-//! # struct Buffer;
-//! # impl Mapper for NesMemoryMapper {
-//! #     fn read(&mut self, addr: u16) -> u8 { todo!() }
-//! #     fn write(&mut self, addr: u16, value: u8) {}
-//! # }
-//! #
-//! # impl PixelBuffer for Buffer {
-//! #     fn set_color(&mut self, x: u8, y: u8, c: u8, emphasis: ColorEmphasis) {}
-//! # }
-//! #
-//! # impl NesMemoryMapper {
-//! #     fn new() -> Self { NesMemoryMapper }
-//! # }
-//! # impl Buffer {
-//! #     fn new() -> Self { Buffer }
-//! # }
+//! ## Features
+//! * `no_std` support
+//! * Cycle-based emulation, including accurate timings for sprite processing and mapper accesses
+//! * Emulation of all PPU registers (0x2000-0x2007)
+//! * Support for arbitrary custom memory mappers and output formats
+//! * Most system quirks are properly emulated:
+//!   * Garbage nametable fetches
+//!   * Different total cycle counts on even vs. odd frames
+//!   * Buggy overflow flag behavior
+//!   * Reading OAMDATA during rendering snoops on internal sprite processing state
+//!   * Incorrect color output during forced blanking when vram address indexes palette ram
+//!   * Etc.
+//!
+//! ## Limitations
+//! * PPU register accesses happen "instantaneously," and do not cause the PPU to tick forwards
+//!   despite reads/writes taking multiple cycles on real hardware
+//!     * For truly accurate graphics, users must therefore be careful to weigh how much work is
+//!       being done relative to when/how often they tick the PPU
+//! * No support for PAL or Dendy PPUs
+//! * No emulation of open bus behavior
+//! * Mapper reads take 1 cycle to resolve, instead of 2 like on real hardware (the timings of when
+//!   the reads start are still accurate)
+//!
+//! ## Example
+//! ```
+//! use nes_ppu::{Ppu, Mapper, PixelBuffer, Color, ColorEmphasis};
+//!
+//! struct ExamplePixelBuffer {
+//!     /* ... */
+//! }
+//!
+//! impl ExamplePixelBuffer {
+//!     fn render_to_screen(&self) {
+//!         /* ... */
+//!     }
+//! }
+//!
+//! impl PixelBuffer for ExamplePixelBuffer {
+//!     fn set_color(&mut self, x: u8, y: u8, color: Color, emphasis: ColorEmphasis) {
+//!         // write color information into internal screen buffer to be rendered when the frame
+//!         // is complete
+//!         /* ... */
+//!     }
+//! }
+//!
+//! struct ExampleMapper {
+//!     /* ... */
+//! }
+//!
+//! impl Mapper for ExampleMapper {
+//!     fn read(&mut self, addr: u16) -> u8 {
+//!         /* ... */
+//! #       0
+//!     }
+//!
+//!     fn write(&mut self, addr: u16, value: u8) {
+//!         /* ... */
+//!     }
+//! }
 //!
 //! fn main_loop() {
 //!     let mut ppu = Ppu::new();
-//!
-//!     // example types not provided by this library
-//!     let mut mapper = NesMemoryMapper::new();
-//!     let mut pixel_buf = Buffer::new();
+//!     let mut mapper = ExampleMapper { /* ... */ };
+//!     let mut buf = ExamplePixelBuffer { /* ... */ };
 //!
 //!     loop {
 //!         // run main game logic here
 //!
-//!         ppu.tick_to_next_sprite_0_hit(&mut mapper, &mut pixel_buf);
+//!         ppu.tick_to_next_sprite_0_hit(&mut mapper, &mut buf);
 //!         // add sprite 0 hit raster effect here
 //!
-//!         ppu.tick_to_next_vblank(&mut mapper, &mut pixel_buf);
-//!         // render pixel buffer to screen here
+//!         ppu.tick_to_next_vblank(&mut mapper, &mut buf);
+//!         buf.render_to_screen();
+//!
+//!         // modify vram and set up scroll position for next frame here
 //!     }
 //! }
+//! ```
 
 #![no_std]
 #[cfg(test)]

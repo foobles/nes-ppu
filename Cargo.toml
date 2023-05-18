@@ -1,12 +1,13 @@
 [package]
 name = "nes-ppu"
-version = "0.1.1"
+version = "0.2.0"
 description = "A NES graphics emulator with a generic pluggable interface."
 edition = "2021"
 license = "CC-BY-NC-4.0"
 keywords = ["NES", "emulator", "graphics", "gamedev"]
-categories = ["emulators", "rendering"]
+categories = ["emulators", "rendering", "no-std::no-alloc"]
 repository = "https://github.com/foobles/nes-ppu"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
